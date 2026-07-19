@@ -30,6 +30,25 @@ func (a navigationPlanner) PlanChapters(context.Context, string, search.ChapterP
 	return search.ChapterPlan{Candidates: []search.ChapterCandidate{{Source: "div#catalog", Score: 42, Chapters: []search.Chapter{{Title: "第一章"}}, Preview: []string{"第一章"}}}}, nil
 }
 
+type credentialsAdapter struct {
+	navigationAdapter
+	loginErr error
+	loggedIn bool
+}
+
+func (a *credentialsAdapter) RequiresAuthentication() bool { return true }
+func (a *credentialsAdapter) IsAuthenticated() bool        { return a.loggedIn }
+func (a *credentialsAdapter) Login(_ context.Context, username, password string) error {
+	if a.loginErr != nil {
+		return a.loginErr
+	}
+	if username == "alice" && password == "secret" {
+		a.loggedIn = true
+		return nil
+	}
+	return context.Canceled
+}
+
 func newNavigationModel(t *testing.T) *Model {
 	t.Helper()
 	registry := search.NewRegistry()
@@ -143,5 +162,46 @@ func TestTruncateHonorsCJKCellWidth(t *testing.T) {
 	got := truncate("中文标题很长", 7)
 	if width := lipgloss.Width(got); width > 7 {
 		t.Fatalf("truncate width = %d, want <= 7: %q", width, got)
+	}
+}
+
+func TestCredentialsLoginMovesFromAuthToSearchAndClearsInputs(t *testing.T) {
+	registry := search.NewRegistry()
+	adapter := &credentialsAdapter{navigationAdapter: navigationAdapter{name: "百合会"}}
+	registry.Register(adapter)
+	history, err := store.LoadHistory(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewModel(search.NewEngine(registry), scraper.NewEngine(scraper.DefaultConfig()), history, "test")
+	var cmds []tea.Cmd
+	m.selectSource(&cmds)
+	if m.section != SecAuth {
+		t.Fatalf("section = %v, want auth", m.section)
+	}
+	m.auth.username.SetValue("alice")
+	m.auth.password.SetValue("secret")
+	m.auth.focus = 1
+	cmds = nil
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter}, &cmds)
+	if !m.auth.busy || m.auth.password.Value() != "" || len(cmds) != 1 {
+		t.Fatalf("login command not started securely: busy=%v password=%q cmds=%d", m.auth.busy, m.auth.password.Value(), len(cmds))
+	}
+	msg := cmds[0]()
+	_, _ = m.Update(msg)
+	if m.section != SecSearch || !adapter.loggedIn || m.auth.username.Value() != "" || m.auth.password.Value() != "" {
+		t.Fatalf("login result not applied: section=%v loggedIn=%v", m.section, adapter.loggedIn)
+	}
+}
+
+func TestLeavingAuthClearsPassword(t *testing.T) {
+	m := newNavigationModel(t)
+	m.section = SecAuth
+	m.auth.username.SetValue("alice")
+	m.auth.password.SetValue("secret")
+	var cmds []tea.Cmd
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc}, &cmds)
+	if m.section != SecSources || m.auth.password.Value() != "" {
+		t.Fatalf("password survived auth exit: section=%v password=%q", m.section, m.auth.password.Value())
 	}
 }

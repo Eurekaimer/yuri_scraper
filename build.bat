@@ -18,12 +18,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-copy /Y "%VERSIONED_EXE%" "yuri_scraper.exe" >nul
-if errorlevel 1 (
-    echo Failed to update yuri_scraper.exe.
-    exit /b 1
-)
+if exist "yuri_scraper.exe" del /Q "yuri_scraper.exe"
 
 echo Built %VERSIONED_EXE%
-echo Updated yuri_scraper.exe
 ".\%VERSIONED_EXE%" --version

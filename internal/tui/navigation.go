@@ -28,6 +28,7 @@ func (m *Model) handleKey(msg tea.KeyMsg, cmds *[]tea.Cmd) bool {
 	case "esc":
 		switch m.section {
 		case SecAuth:
+			m.auth.clearPassword()
 			*cmds = append(*cmds, m.setSection(SecSources))
 		case SecLibrary:
 			target := m.returnSection
@@ -58,6 +59,7 @@ func (m *Model) handleKey(msg tea.KeyMsg, cmds *[]tea.Cmd) bool {
 		if m.section == SecProgress && !m.progress.done {
 			return true
 		}
+		m.auth.clearPassword()
 		*cmds = append(*cmds, m.setSection(SecSources))
 		return true
 	}
@@ -99,12 +101,32 @@ func (m *Model) handleKey(msg tea.KeyMsg, cmds *[]tea.Cmd) bool {
 		}
 		return true
 	case SecAuth:
+		if key == "tab" || key == "shift+tab" {
+			*cmds = append(*cmds, m.auth.toggleFocus())
+			return true
+		}
 		if key == "enter" && len(m.sources) > 0 {
-			if auth, ok := m.sources[m.sourceCursor].(search.CookieAuthenticator); ok && strings.TrimSpace(m.authInput.Value()) != "" {
-				auth.SetCookie(m.authInput.Value())
-				m.authInput.SetValue("")
-				*cmds = append(*cmds, m.setSection(SecSearch))
+			if m.auth.busy {
+				return true
 			}
+			if m.auth.focus == 0 {
+				m.auth.focus = 1
+				*cmds = append(*cmds, m.auth.focusCmd())
+				return true
+			}
+			username, password, err := m.auth.credentials()
+			if err != nil {
+				m.auth.err = err
+				return true
+			}
+			auth, ok := m.sources[m.sourceCursor].(search.CredentialsAuthenticator)
+			if !ok {
+				m.auth.err = errors.New("当前来源不支持账号密码登录")
+				return true
+			}
+			m.auth.busy, m.auth.err = true, nil
+			m.auth.clearPassword()
+			*cmds = append(*cmds, authenticate(m.ctx, auth, username, password))
 			return true
 		}
 		return false
@@ -147,7 +169,9 @@ func (m *Model) selectSource(cmds *[]tea.Cmd) bool {
 	m.selectedSite = adapter.Name()
 	m.results = nil
 	m.cursor = 0
-	if auth, ok := adapter.(search.CookieAuthenticator); ok && auth.RequiresCookie() && !auth.HasCookie() {
+	if auth, ok := adapter.(search.CredentialsAuthenticator); ok && auth.RequiresAuthentication() && !auth.IsAuthenticated() {
+		m.auth.err = nil
+		m.auth.busy = false
 		*cmds = append(*cmds, m.setSection(SecAuth))
 	} else {
 		*cmds = append(*cmds, m.setSection(SecSearch))

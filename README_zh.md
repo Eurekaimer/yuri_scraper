@@ -18,10 +18,11 @@ YuriScraper 是使用 Go 与 Bubble Tea 编写的键盘流 TUI。v0.6.1 继续�
 | 来源 | 访问方式 | v0.6 支持情况 |
 |---|---|---|
 | 52书库 | 公开访问 | 搜索、元数据、章节下载 |
-| 百合会 | Cookie | 论坛搜索、目录/电梯识别、楼层正文下载 |
+| 百合会 | 账号密码 | 论坛搜索、目录/电梯识别、楼层正文下载 |
 
-百合会 Cookie 直接在 TUI 内粘贴，只保留在本次运行的内存中，不会写入
-YAML、下载历史、解析 checkpoint 或日志。下载前可明确选择自动识别、
+百合会账号和密码直接在 TUI 内输入。程序读取 Discuz 登录页 `formhash`，
+建立只存在于内存中的会话，并立即清空凭据输入框；账号、密码和会话均不会
+写入 YAML、下载历史、解析 checkpoint 或日志。下载前可明确选择自动识别、
 目录/电梯或跨页作者楼层模式。
 
 ## v0.6.1 重点改动
@@ -54,8 +55,8 @@ YAML、下载历史、解析 checkpoint 或日志。下载前可明确选择自�
 安装 Python、Java 或额外运行时。
 
 本地 Windows 构建请运行 `build.bat`。脚本从 `release/VERSION` 读取版本，
-同时更新根目录的 `yuri_scraper.exe` 并生成 `yuri_scraper-v0.6.1.exe`。
-可用 `.\yuri_scraper.exe --version` 在不进入 TUI 的情况下核对版本。
+根目录只生成 `yuri_scraper-v0.6.1.exe`。可用
+`.\yuri_scraper-v0.6.1.exe --version` 在不进入 TUI 的情况下核对版本。
 
 从源码构建：
 
@@ -71,7 +72,7 @@ go build -trimpath -ldflags="-s -w -X main.Version=0.6.1" -o yuri-scraper ./cmd/
 | 界面 | 键位 |
 |---|---|
 | 来源选择 | `1/2`、`j/k`、`Enter` |
-| 百合会认证 | 粘贴 Cookie、`Enter` 确认、`Esc` 返回 |
+| 百合会认证 | 输入账号密码、`Tab` 切换、`Enter` 登录、`Esc` 返回 |
 | 搜索栏 | 输入关键词、`Enter` 搜索、`Tab` 或 `↓` 进入结果 |
 | 结果栏 | `j/k`、`g/G`、`Ctrl+D/U`、`Enter` 下载 |
 | 百合会规划 | `1/2/3` 模式、`Tab` 参数、`h/l` 目录候选、`Enter` 继续 |
@@ -102,15 +103,15 @@ yamibo:
 配置决定启动时的默认值；下载过程中按 `1/2/3` 会同时调整并发和速率。
 百合会会额外限制为最多 2 个 worker、1.2 请求/秒，避免把 52书库的快速档
 直接套到论坛上。
-v0.6.0 配置仍可直接使用；缺少的 `yamibo` 字段会合并默认值。Cookie 和
-密码不是配置字段。
+v0.6.0 配置仍可直接使用；缺少的 `yamibo` 字段会合并默认值。百合会账号、
+密码和会话 Cookie 都不是配置字段。
 
 ## 已知限制
 
 - 论坛 HTML 可能变化；fixtures 覆盖代表性的目录、分页、登录失效和楼层
   布局，但不能保证所有历史主题模板。
-- 真实网络测试必须显式设置 `YURISCRAPER_LIVE_TEST=1`，Cookie 只能通过
-  环境变量提供。本次候选版本未使用真实百合会 Cookie 验证。
+- 真实网络测试必须显式设置 `YURISCRAPER_LIVE_TEST=1`；默认测试只使用本地
+  HTTP fixture，不包含或读取个人账号密码。
 
 ## 开发与发布
 

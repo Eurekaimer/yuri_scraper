@@ -39,3 +39,4 @@ bin/
 # Environment
 .env
 .env.local
+yamibo_config.json

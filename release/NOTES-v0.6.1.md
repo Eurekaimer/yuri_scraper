@@ -29,7 +29,8 @@ without changing the 52shuku adapter.
 
 ## Security and access
 
-- Cookie values remain memory-only and are not written to YAML, history,
+- Yamibo account/password login reads the Discuz `formhash` and retains only the
+  resulting session in memory. Credentials are not written to YAML, history,
   logs, errors, or scan checkpoints.
 - Yamibo stays capped at two workers and 1.2 requests per second.
 - No Cloudflare, CAPTCHA, or access-control bypass is implemented.

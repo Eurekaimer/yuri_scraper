@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Eurekaimer/yuri_scraper/internal/search"
 	"github.com/PuerkitoBio/goquery"
@@ -29,8 +28,8 @@ var (
 )
 
 // Yamibo adapts authenticated Yamibo forum threads to the common book source
-// interface. v0.6 starts with cookie authentication and catalog/elevator
-// threads; author-post extraction falls back to scanning the thread pages.
+// interface. Account/password login establishes an in-memory HTTP session;
+// catalog and author-post extraction then share that session.
 type Yamibo struct {
 	baseURL        string
 	client         *http.Client
@@ -39,12 +38,13 @@ type Yamibo struct {
 	maxRPS         float64
 	mu             sync.RWMutex
 	cookie         string
+	authenticated  bool
 }
 
 func NewYamibo() *Yamibo {
 	return &Yamibo{
 		baseURL:        yamiboBaseURL,
-		client:         &http.Client{Timeout: 20 * time.Second},
+		client:         newYamiboHTTPClient(),
 		limiter:        rate.NewLimiter(rate.Limit(1.2), 1),
 		maxConcurrency: 2,
 		maxRPS:         1.2,
@@ -65,17 +65,21 @@ func NewYamiboWithPolicy(maxConcurrency int64, maxRPS float64) *Yamibo {
 
 func (y *Yamibo) Name() string                  { return "百合会" }
 func (y *Yamibo) BaseURL() string               { return y.baseURL }
-func (y *Yamibo) RequiresCookie() bool          { return true }
+func (y *Yamibo) RequiresAuthentication() bool  { return true }
 func (y *Yamibo) MaxConcurrency() int64         { return y.maxConcurrency }
 func (y *Yamibo) MaxRequestsPerSecond() float64 { return y.maxRPS }
-func (y *Yamibo) HasCookie() bool {
+func (y *Yamibo) IsAuthenticated() bool {
 	y.mu.RLock()
 	defer y.mu.RUnlock()
-	return strings.TrimSpace(y.cookie) != ""
+	return y.authenticated || strings.TrimSpace(y.cookie) != ""
 }
+
+// SetCookie remains available for opt-in live tests and API compatibility.
+// The TUI uses Login and never asks users to copy browser cookies.
 func (y *Yamibo) SetCookie(cookie string) {
 	y.mu.Lock()
 	y.cookie = strings.TrimSpace(cookie)
+	y.authenticated = y.cookie != ""
 	y.mu.Unlock()
 }
 
@@ -93,10 +97,12 @@ func (y *Yamibo) document(ctx context.Context, rawURL string) (*goquery.Document
 	y.mu.RLock()
 	cookie := y.cookie
 	y.mu.RUnlock()
-	if cookie == "" {
-		return nil, fmt.Errorf("百合会需要 Cookie，请返回来源页重新认证")
+	if !y.IsAuthenticated() {
+		return nil, fmt.Errorf("百合会需要登录，请返回来源页使用账号密码登录")
 	}
-	req.Header.Set("Cookie", cookie)
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
 
 	resp, err := y.client.Do(req)
 	if err != nil {
@@ -111,7 +117,8 @@ func (y *Yamibo) document(ctx context.Context, rawURL string) (*goquery.Document
 		return nil, fmt.Errorf("解析百合会页面: %w", err)
 	}
 	if doc.Find("form#loginform, .loginbox").Length() > 0 && doc.Find("#postlist, a.xst").Length() == 0 {
-		return nil, fmt.Errorf("Cookie 已失效，请重新认证")
+		y.markUnauthenticated()
+		return nil, fmt.Errorf("百合会会话已失效，请重新输入账号密码登录")
 	}
 	return doc, nil
 }

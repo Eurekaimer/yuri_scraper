@@ -47,12 +47,13 @@ type SiteAdapter interface {
 	GetChapterContent(ctx context.Context, chapterURL string) (string, error)
 }
 
-// CookieAuthenticator is implemented by sources that require an authenticated
-// browser session. The TUI collects the cookie without persisting it to disk.
-type CookieAuthenticator interface {
-	RequiresCookie() bool
-	HasCookie() bool
-	SetCookie(cookie string)
+// CredentialsAuthenticator is implemented by sources that can establish an
+// authenticated session from an account and password. Credentials are supplied
+// for one Login call only; implementations must not persist them.
+type CredentialsAuthenticator interface {
+	RequiresAuthentication() bool
+	IsAuthenticated() bool
+	Login(context.Context, string, string) error
 }
 
 // ScrapePolicyProvider lets a sensitive source cap the global speed profiles.

@@ -44,7 +44,7 @@ func (m *Model) View() string {
 	if m.section == SecSources {
 		input = MutedStyle.Render("  先选择内容来源")
 	} else if m.section == SecAuth {
-		input = m.authInput.View()
+		input = ""
 	} else if m.section == SecChapterPlan {
 		input = MutedStyle.Render("  下载: " + m.activeBook.Title)
 	} else if m.section == SecSearch || m.section == SecResults {
@@ -118,8 +118,8 @@ func (m *Model) renderSourcesContent() string {
 			prefix, style = "▸ ", SelectedItemStyle
 		}
 		access := "PUBLIC"
-		if auth, ok := source.(search.CookieAuthenticator); ok && auth.RequiresCookie() {
-			access = "COOKIE"
+		if auth, ok := source.(search.CredentialsAuthenticator); ok && auth.RequiresAuthentication() {
+			access = "ACCOUNT"
 		}
 		b.WriteString(fmt.Sprintf("%s%02d  %s  %s\n", prefix, i+1, style.Render(source.Name()), MutedStyle.Render(access)))
 	}
@@ -127,9 +127,22 @@ func (m *Model) renderSourcesContent() string {
 }
 
 func (m *Model) renderAuthContent() string {
-	return TitleStyle.Render("AUTH // 百合会会话") + "\n\n" +
-		MutedStyle.Render("  请从已登录的浏览器复制 bbs.yamibo.com Cookie。Cookie 不会写入配置或历史文件。") + "\n" +
-		SubtitleStyle.Render("  Enter 确认  Esc 返回来源选择")
+	usernameMark, passwordMark := "  ", "  "
+	if m.auth.focus == 0 {
+		usernameMark = "▶ "
+	} else {
+		passwordMark = "▶ "
+	}
+	status := MutedStyle.Render("  账号和密码仅用于本次登录请求；成功后只在内存中保留会话。")
+	if m.auth.busy {
+		status = MutedStyle.Render("  ● 正在登录百合会……")
+	} else if m.auth.err != nil {
+		status = ErrorStyle.Render("  ⚠ " + m.auth.err.Error())
+	}
+	return TitleStyle.Render("AUTH // 百合会账号登录") + "\n\n" +
+		usernameMark + MutedStyle.Render("账号  ") + m.auth.username.View() + "\n\n" +
+		passwordMark + MutedStyle.Render("密码  ") + m.auth.password.View() + "\n\n" +
+		status + "\n" + SubtitleStyle.Render("  Tab 切换输入框  Enter 登录  Esc 返回来源选择")
 }
 
 func (m *Model) renderSearchWorkspace(w int) string {
@@ -305,7 +318,7 @@ func (m *Model) renderStatusBar() string {
 	case SecSources:
 		return StatusBarStyle.Render(key("1/2") + " 来源  " + key("Enter") + " 选择  " + key("Ctrl+C") + " 退出")
 	case SecAuth:
-		return StatusBarStyle.Render(key("Enter") + " 使用 Cookie  " + key("Esc") + " 返回  " + key("Ctrl+C") + " 退出")
+		return StatusBarStyle.Render(key("Tab") + " 切换账号/密码  " + key("Enter") + " 登录  " + key("Esc") + " 返回  " + key("Ctrl+C") + " 退出")
 	case SecSearch, SecResults:
 		return StatusBarStyle.Render(
 			key("Enter") + " 搜索/下载  " + key("Tab/←/→/Alt+h/l") + " 分栏切换  " + key("/") + " 搜索栏  " +

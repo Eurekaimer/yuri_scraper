@@ -107,7 +107,7 @@ func TestYamiboAuthorPaginationDeduplicatesAndResumes(t *testing.T) {
 	}
 }
 
-func TestYamiboCookieInvalidFixture(t *testing.T) {
+func TestYamiboSessionInvalidFixture(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("testdata", "yamibo_cookie_invalid.html"))
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +116,7 @@ func TestYamiboCookieInvalidFixture(t *testing.T) {
 	defer server.Close()
 	y := &Yamibo{baseURL: server.URL + "/", client: server.Client(), limiter: rate.NewLimiter(rate.Inf, 1), cookie: "expired=true"}
 	_, err = y.document(context.Background(), server.URL)
-	if err == nil || !strings.Contains(err.Error(), "Cookie 已失效") {
+	if err == nil || !strings.Contains(err.Error(), "会话已失效") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }

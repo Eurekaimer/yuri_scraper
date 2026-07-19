@@ -23,7 +23,7 @@ func TestRepositoryBuildEntrypointsUseReleaseVersion(t *testing.T) {
 		required  []string
 		forbidden []string
 	}{
-		{"build.bat", []string{"release\\VERSION", "cmd\\yuri_scraper", "yuri_scraper-v%VERSION%.exe"}, []string{"cmd\\52scraper", "set VERSION=0.6.0"}},
+		{"build.bat", []string{"release\\VERSION", "cmd\\yuri_scraper", "yuri_scraper-v%VERSION%.exe", "del /Q \"yuri_scraper.exe\""}, []string{"cmd\\52scraper", "set VERSION=0.6.0", "copy /Y"}},
 		{"build.sh", []string{"release/VERSION", "yuri-scraper-v${VERSION}"}, []string{"VERSION=\"${1:-0.6.0}"}},
 		{"Makefile", []string{"release/VERSION", "yuri_scraper-v$(VERSION)"}, []string{"VERSION ?= 0.6.0"}},
 		{filepath.Join(".github", "workflows", "release.yml"), []string{"yuri-scraper-v${{ steps.version.outputs.value }}"}, nil},

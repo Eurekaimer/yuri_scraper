@@ -19,8 +19,8 @@ flowchart TD
 ```
 
 The TUI selects exactly one source for each search. Public sources continue
-directly to search; authenticated sources implement `CookieAuthenticator` and
-receive credentials from the in-memory TUI authentication view.
+directly to search; authenticated sources implement `CredentialsAuthenticator`
+and receive credentials from the in-memory TUI authentication view.
 
 ## Package responsibilities
 
@@ -52,10 +52,10 @@ type SiteAdapter interface {
 Optional capabilities keep public sources simple:
 
 ```go
-type CookieAuthenticator interface {
-    RequiresCookie() bool
-    HasCookie() bool
-    SetCookie(string)
+type CredentialsAuthenticator interface {
+    RequiresAuthentication() bool
+    IsAuthenticated() bool
+    Login(context.Context, string, string) error
 }
 
 type BookMetaProvider interface {
@@ -63,7 +63,8 @@ type BookMetaProvider interface {
 }
 ```
 
-52shuku supplies rich metadata. Yamibo implements cookie authentication and
+52shuku supplies rich metadata. Yamibo reads the Discuz login formhash, submits
+the account/password form, retains only the resulting in-memory cookie jar, and
 maps forum threads/catalog links onto the shared book/chapter representation.
 
 Yamibo additionally implements the optional `ChapterPlanner` protocol. It
@@ -86,7 +87,7 @@ stateDiagram-v2
     [*] --> Sources
     Sources --> Auth: authenticated source
     Sources --> Search: public source
-    Auth --> Search: Cookie accepted
+    Auth --> Search: account login succeeds
     Search --> Results: search succeeds
     Results --> Progress: Enter
     Progress --> Results: Esc or Enter

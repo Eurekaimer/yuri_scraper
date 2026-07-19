@@ -21,7 +21,6 @@ release: clean
 # Windows build (local test)
 build-win:
 	go build -trimpath -ldflags="$(LDFLAGS)" -o bin/yuri_scraper-v$(VERSION).exe ./cmd/yuri_scraper/
-	cp bin/yuri_scraper-v$(VERSION).exe bin/yuri_scraper.exe
 
 # Quick run
 run:

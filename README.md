@@ -19,11 +19,13 @@ and a bounded worker pool whose concurrency can be changed while downloading.
 | Source | Access | v0.6 support |
 |---|---|---|
 | 52shuku | Public | Search, metadata, chapter download |
-| Yamibo | Cookie | Forum search, catalog/elevator detection, post download |
+| Yamibo | Account/password | Forum search, catalog/elevator detection, post download |
 
-Yamibo cookies are entered inside the TUI and kept in memory only. They are not
-written to YAML, history, parser checkpoints, or log files. Yamibo downloads
-now offer explicit auto, catalog/elevator, and paginated author-post modes.
+Yamibo credentials are entered inside the TUI. YuriScraper reads the Discuz
+`formhash`, establishes an in-memory session, and clears the input fields.
+Accounts, passwords, and session cookies are not written to YAML, history,
+parser checkpoints, or logs. Yamibo downloads offer explicit auto,
+catalog/elevator, and paginated author-post modes.
 
 ## Highlights
 
@@ -54,16 +56,16 @@ go build -trimpath -ldflags="-s -w -X main.Version=0.6.1" -o yuri-scraper ./cmd/
 ```
 
 Windows users can run the release `yuri-scraper-v0.6.1-windows-amd64.exe` directly.
-Local Windows builds use `build.bat`, which reads `release/VERSION`, updates
-`yuri_scraper.exe`, and also creates `yuri_scraper-v0.6.1.exe`. Verify a
-binary without starting the TUI with `.\yuri_scraper.exe --version`.
+Local Windows builds use `build.bat`, which reads `release/VERSION` and creates
+only `yuri_scraper-v0.6.1.exe` in the project root. Verify it without starting
+the TUI with `.\yuri_scraper-v0.6.1.exe --version`.
 
 ## Keyboard map
 
 | View | Keys |
 |---|---|
 | Source | `1/2`, `j/k`, `Enter` |
-| Authentication | paste Cookie, `Enter`, `Esc` |
+| Authentication | account/password, `Tab`, `Enter`, `Esc` |
 | Search input | type, `Enter` search, `Tab` or `↓` results |
 | Results | `j/k`, `g/G`, `Ctrl+D/U`, `Enter` download |
 | Yamibo plan | `1/2/3` mode, `Tab` fields, `h/l` catalog candidate, `Enter` continue |
@@ -96,17 +98,16 @@ The initial values come from YAML. During a download, `1/2/3` switches both
 worker concurrency and request rate. Retried requests are rate-limited too.
 Yamibo applies a conservative source cap of two workers and 1.2 requests/s.
 Existing v0.6.0 configurations remain valid; missing `yamibo` fields are
-merged with these defaults. Cookies and passwords are never configuration
-fields.
+merged with these defaults. Yamibo accounts, passwords, and session cookies are
+never configuration fields.
 
 ## Known limitations
 
 - Forum markup may change; the bundled fixtures cover representative Discuz
   catalog, pagination, login-expiry, and post layouts but cannot guarantee
   every historical theme.
-- Live tests require an explicit `YURISCRAPER_LIVE_TEST=1` opt-in and a cookie
-  supplied through the environment. No live Yamibo session was used to verify
-  this release candidate.
+- Live tests require an explicit `YURISCRAPER_LIVE_TEST=1` opt-in. Default tests
+  use local HTTP fixtures and never contain or read personal credentials.
 
 ## Development
 
