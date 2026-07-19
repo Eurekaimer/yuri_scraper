@@ -11,9 +11,13 @@ import (
 
 // WriteEPUB writes an EPUB 3 file from chapter data.
 // EPUB is essentially a ZIP with specific XML files.
-func WriteEPUB(w io.Writer, meta BookMeta) error {
+func WriteEPUB(w io.Writer, meta BookMeta) (err error) {
 	zw := zip.NewWriter(w)
-	defer zw.Close()
+	defer func() {
+		if closeErr := zw.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	bookID := fmt.Sprintf("yuri_scraper-%s", now)
@@ -51,7 +55,9 @@ func WriteEPUB(w io.Writer, meta BookMeta) error {
 	if err != nil {
 		return err
 	}
-	mw.Write([]byte("application/epub+zip"))
+	if _, err := mw.Write([]byte("application/epub+zip")); err != nil {
+		return err
+	}
 
 	// META-INF/container.xml
 	containerXML := `<?xml version="1.0" encoding="UTF-8"?>
@@ -60,7 +66,9 @@ func WriteEPUB(w io.Writer, meta BookMeta) error {
     <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
   </rootfiles>
 </container>`
-	writeZipFile(zw, "META-INF/container.xml", containerXML)
+	if err := writeZipFile(zw, "META-INF/container.xml", containerXML); err != nil {
+		return err
+	}
 
 	// Build chapter XHTML files
 	var chapterFiles []string
@@ -100,7 +108,9 @@ func WriteEPUB(w io.Writer, meta BookMeta) error {
 		}
 		htmlContent.WriteString("</body>\n</html>")
 
-		writeZipFile(zw, "OEBPS/"+fname, htmlContent.String())
+		if err := writeZipFile(zw, "OEBPS/"+fname, htmlContent.String()); err != nil {
+			return err
+		}
 	}
 
 	// CSS for reading comfort
@@ -112,32 +122,43 @@ func WriteEPUB(w io.Writer, meta BookMeta) error {
 }
 h1 { font-size: 1.4em; margin: 1em 0 0.5em; text-align: center; }
 p { text-indent: 2em; margin: 0.5em 0; }`
-	writeZipFile(zw, "OEBPS/style.css", css)
+	if err := writeZipFile(zw, "OEBPS/style.css", css); err != nil {
+		return err
+	}
 
 	// Add style.css to manifest
 	chapterFiles = append(chapterFiles, "style.css")
 
 	// content.opf with full metadata
 	opf := buildOPF(bookID, title, author, lang, meta.Description, meta.Protagonist, tags, chapterFiles)
-	writeZipFile(zw, "OEBPS/content.opf", opf)
+	if err := writeZipFile(zw, "OEBPS/content.opf", opf); err != nil {
+		return err
+	}
 
 	// toc.ncx (for backwards compatibility)
 	ncx := buildNCX(bookID, title, meta.Chapters)
-	writeZipFile(zw, "OEBPS/toc.ncx", ncx)
+	if err := writeZipFile(zw, "OEBPS/toc.ncx", ncx); err != nil {
+		return err
+	}
 
 	// nav.xhtml (EPUB 3 navigation)
 	nav := buildNav(meta.Chapters)
-	writeZipFile(zw, "OEBPS/nav.xhtml", nav)
+	if err := writeZipFile(zw, "OEBPS/nav.xhtml", nav); err != nil {
+		return err
+	}
 
 	return nil
 }
 
-func writeZipFile(zw *zip.Writer, name, content string) {
+func writeZipFile(zw *zip.Writer, name, content string) error {
 	w, err := zw.Create(name)
 	if err != nil {
-		panic(fmt.Sprintf("zip create %s: %v", name, err))
+		return fmt.Errorf("zip create %s: %w", name, err)
 	}
-	io.WriteString(w, content)
+	if _, err := io.WriteString(w, content); err != nil {
+		return fmt.Errorf("zip write %s: %w", name, err)
+	}
+	return nil
 }
 
 func buildOPF(id, title, author, lang, description, protagonist string, tags, chapters []string) string {

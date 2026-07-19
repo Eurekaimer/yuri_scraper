@@ -2,6 +2,7 @@ package search
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -76,13 +77,18 @@ func (r *Registry) SearchAll(ctx context.Context, query string) ([]SearchResult,
 	}()
 
 	var all []SearchResult
+	var searchErrors []error
+	succeeded := 0
 	for r := range ch {
 		if r.err != nil {
-			fmt.Printf("[warn] site %s search error: %v\n", r.name, r.err)
+			searchErrors = append(searchErrors, fmt.Errorf("site %s: %w", r.name, r.err))
 			continue
 		}
+		succeeded++
 		all = append(all, r.items...)
 	}
-
+	if succeeded == 0 {
+		return nil, errors.Join(searchErrors...)
+	}
 	return all, nil
 }

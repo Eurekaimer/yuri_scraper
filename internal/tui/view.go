@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Eurekaimer/yuri_scraper/internal/buildinfo"
 	"github.com/Eurekaimer/yuri_scraper/internal/scraper"
 	"github.com/Eurekaimer/yuri_scraper/internal/search"
 	"github.com/charmbracelet/lipgloss"
@@ -18,7 +19,7 @@ func (m *Model) View() string {
 
 	header := BrandStyle.Render(" YuriScraper")
 	if m.version != "dev" {
-		header += MutedStyle.Render(" v" + m.version)
+		header += MutedStyle.Render(" " + buildinfo.VersionLabel(m.version))
 	}
 
 	var content string

@@ -33,6 +33,7 @@ receive credentials from the in-memory TUI authentication view.
 | `internal/scraper` | Worker scheduling, rate limiting, retries, checkpoints |
 | `internal/converter` | Chapter splitting, zh conversion, TXT and EPUB output |
 | `internal/store` | YAML configuration and atomic JSON history |
+| `internal/buildinfo` | Version normalization and user-visible build identity |
 
 ## Source interfaces
 
@@ -118,6 +119,10 @@ Every attempt, including retries, waits on the token bucket. Retry delays use
 exponential backoff capped at 30 seconds plus a small deterministic jitter.
 Idle time cannot accumulate a large burst. Sources may implement
 `ScrapePolicyProvider`; Yamibo caps the profiles at two workers and 1.2 req/s.
+
+The scraper package separates policy/orchestration (`engine.go`), bounded
+workers and retries (`worker.go`), and checkpoint/output persistence
+(`output.go`). This keeps site planning independent from export mechanics.
 
 ## Checkpoints and partial failure
 

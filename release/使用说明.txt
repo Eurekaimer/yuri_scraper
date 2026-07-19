@@ -1,14 +1,14 @@
-# YuriScraper v0.6.0 — 使用说明
+# YuriScraper v0.6.1 — 使用说明
 
 ## Windows
 
-直接双击 `yuri-scraper-windows-amd64.exe` 即可运行。
+直接双击 `yuri-scraper-v0.6.1-windows-amd64.exe` 即可运行。
 
 > 如果 Windows Defender 报警，点击「更多信息」→「仍要运行」。
 > `amd64` = 64位 Intel/AMD 处理器，绝大多数 Windows 电脑都是这个。
 
 ```
-yuri-scraper-windows-amd64.exe
+yuri-scraper-v0.6.1-windows-amd64.exe
 ```
 
 ---
@@ -18,8 +18,8 @@ yuri-scraper-windows-amd64.exe
 先给执行权限，然后运行：
 
 ```bash
-chmod +x yuri-scraper-linux-amd64
-./yuri-scraper-linux-amd64
+chmod +x yuri-scraper-v0.6.1-linux-amd64
+./yuri-scraper-v0.6.1-linux-amd64
 ```
 
 > Linux 可执行文件**不需要 .exe 后缀**，这是 Windows 特有的。
@@ -27,27 +27,27 @@ chmod +x yuri-scraper-linux-amd64
 
 | 文件 | 适用平台 |
 |------|---------|
-| `yuri-scraper-linux-amd64` | Intel/AMD 64位 Linux |
-| `yuri-scraper-linux-arm64` | ARM 64位 Linux（树莓派4/5、AWS Graviton） |
+| `yuri-scraper-v0.6.1-linux-amd64` | Intel/AMD 64位 Linux |
+| `yuri-scraper-v0.6.1-linux-arm64` | ARM 64位 Linux（树莓派4/5、AWS Graviton） |
 
 ---
 
 ## macOS
 
 ```bash
-chmod +x yuri-scraper-darwin-arm64
-./yuri-scraper-darwin-arm64
+chmod +x yuri-scraper-v0.6.1-darwin-arm64
+./yuri-scraper-v0.6.1-darwin-arm64
 ```
 
 | 文件 | 适用平台 |
 |------|---------|
-| `yuri-scraper-darwin-arm64` | Apple Silicon（M1/M2/M3/M4） |
-| `yuri-scraper-darwin-amd64` | Intel Mac（2019及之前） |
+| `yuri-scraper-v0.6.1-darwin-arm64` | Apple Silicon（M1/M2/M3/M4） |
+| `yuri-scraper-v0.6.1-darwin-amd64` | Intel Mac（2019及之前） |
 
 > macOS 可能会提示「无法验证开发者」。解决方法：
 > **系统设置 → 隐私与安全性 → 仍要打开**，或终端执行：
 > ```bash
-> xattr -d com.apple.quarantine yuri-scraper-darwin-arm64
+> xattr -d com.apple.quarantine yuri-scraper-v0.6.1-darwin-arm64
 > ```
 
 ---

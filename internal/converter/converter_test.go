@@ -3,10 +3,22 @@ package converter
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"io"
 	"strings"
 	"testing"
 )
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
+
+func TestWriteEPUBPropagatesWriterErrors(t *testing.T) {
+	err := WriteEPUB(failingWriter{}, BookMeta{Title: "test", Chapters: []Chapter{{Title: "one", Content: "body"}}})
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
 
 func TestWriteTXT_Empty(t *testing.T) {
 	var buf bytes.Buffer

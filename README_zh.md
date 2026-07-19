@@ -50,8 +50,12 @@ YAML、下载历史、解析 checkpoint 或日志。下载前可明确选择自�
 ## 安装
 
 推荐从 [GitHub Releases](https://github.com/Eurekaimer/yuri_scraper/releases)
-下载单文件程序。Windows 使用 `yuri-scraper-windows-amd64.exe`，不需要
+下载单文件程序。Windows 使用 `yuri-scraper-v0.6.1-windows-amd64.exe`，不需要
 安装 Python、Java 或额外运行时。
+
+本地 Windows 构建请运行 `build.bat`。脚本从 `release/VERSION` 读取版本，
+同时更新根目录的 `yuri_scraper.exe` 并生成 `yuri_scraper-v0.6.1.exe`。
+可用 `.\yuri_scraper.exe --version` 在不进入 TUI 的情况下核对版本。
 
 从源码构建：
 
@@ -117,7 +121,7 @@ make build
 ```
 
 推送 `v*` 标签后，GitHub Actions 会构建 Windows、Linux 和 macOS 的
-amd64/arm64 产物，并自动附加到 Release。
+amd64/arm64 产物，文件名包含版本号，并自动附加到 Release。
 
 ## 使用边界
 

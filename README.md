@@ -53,7 +53,10 @@ go build -trimpath -ldflags="-s -w -X main.Version=0.6.1" -o yuri-scraper ./cmd/
 ./yuri-scraper
 ```
 
-Windows users can run the release `yuri-scraper-windows-amd64.exe` directly.
+Windows users can run the release `yuri-scraper-v0.6.1-windows-amd64.exe` directly.
+Local Windows builds use `build.bat`, which reads `release/VERSION`, updates
+`yuri_scraper.exe`, and also creates `yuri_scraper-v0.6.1.exe`. Verify a
+binary without starting the TUI with `.\yuri_scraper.exe --version`.
 
 ## Keyboard map
 
@@ -114,7 +117,8 @@ make build
 ```
 
 Pushing a `v*` tag builds Windows, Linux, and macOS binaries and attaches them
-to a GitHub Release. Generated executables are deliberately not committed.
+to a GitHub Release. Artifact filenames include the version. Generated
+executables are deliberately not committed.
 
 ## Responsible use
 

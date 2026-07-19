@@ -68,7 +68,7 @@ jobs:
           mkdir -p dist
           go build -trimpath \
             -ldflags="-s -w -X main.Version=${{ steps.version.outputs.value }}" \
-            -o "dist/yuri-scraper-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}" \
+            -o "dist/yuri-scraper-v${{ steps.version.outputs.value }}-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}" \
             ./cmd/yuri_scraper/
       - uses: actions/upload-artifact@v4
         with:

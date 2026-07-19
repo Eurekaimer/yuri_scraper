@@ -3,6 +3,7 @@ package search
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -104,6 +105,22 @@ func TestRegistry_SearchAllPartialErrors(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Errorf("expected 1 result from good site, got %d", len(results))
+	}
+}
+
+func TestRegistry_SearchAllReturnsErrorWhenEverySiteFails(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&mockAdapter{name: "first", err: errors.New("first failure")})
+	r.Register(&mockAdapter{name: "second", err: errors.New("second failure")})
+	results, err := r.SearchAll(context.Background(), "test")
+	if err == nil {
+		t.Fatal("expected combined error")
+	}
+	if len(results) != 0 {
+		t.Fatalf("results = %d, want 0", len(results))
+	}
+	if !strings.Contains(err.Error(), "first") || !strings.Contains(err.Error(), "second") {
+		t.Fatalf("combined error missed a source: %v", err)
 	}
 }
 

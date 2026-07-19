@@ -22,6 +22,10 @@ without changing the 52shuku adapter.
 - author-search results, query text, and cursor survive a completed download;
   explicit dual panes and focus shortcuts avoid input trapping;
 - v0.6.0 YAML files merge the new Yamibo defaults on load.
+- all local and CI build entrypoints now read the v0.6.1 version consistently;
+  binaries expose `--version` and release artifact filenames include it;
+- EPUB writer failures return errors instead of panicking, and multi-site
+  search no longer prints over the alternate screen.
 
 ## Security and access
 

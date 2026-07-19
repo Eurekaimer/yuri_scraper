@@ -18,6 +18,9 @@ import (
 var Version = "dev"
 
 func main() {
+	if handleMetadataCommand(os.Args[1:], os.Stdout, Version) {
+		return
+	}
 	cfg, err := store.LoadConfig("config.yaml")
 	if err != nil {
 		log.Printf("警告: 读取配置失败: %v (使用默认)", err)
