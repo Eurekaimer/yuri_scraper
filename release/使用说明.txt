@@ -1,0 +1,68 @@
+# YuriScraper v0.3.1 — 使用说明
+
+## Windows
+
+直接双击 `yuri_scraper-windows-amd64.exe` 即可运行。
+
+> 如果 Windows Defender 报警，点击「更多信息」→「仍要运行」。
+> `amd64` = 64位 Intel/AMD 处理器，绝大多数 Windows 电脑都是这个。
+
+```
+yuri_scraper-windows-amd64.exe
+```
+
+---
+
+## Linux（含 NixOS）
+
+先给执行权限，然后运行：
+
+```bash
+chmod +x yuri_scraper-linux-amd64
+./yuri_scraper-linux-amd64
+```
+
+> Linux 可执行文件**不需要 .exe 后缀**，这是 Windows 特有的。
+> `amd64` = x86-64（Intel/AMD），`arm64` = ARM（树莓派、Apple Silicon Linux 等）。
+
+| 文件 | 适用平台 |
+|------|---------|
+| `yuri_scraper-linux-amd64` | Intel/AMD 64位 Linux |
+| `yuri_scraper-linux-arm64` | ARM 64位 Linux（树莓派4/5、AWS Graviton） |
+
+---
+
+## macOS
+
+```bash
+chmod +x yuri_scraper-darwin-arm64
+./yuri_scraper-darwin-arm64
+```
+
+| 文件 | 适用平台 |
+|------|---------|
+| `yuri_scraper-darwin-arm64` | Apple Silicon（M1/M2/M3/M4） |
+| `yuri_scraper-darwin-amd64` | Intel Mac（2019及之前） |
+
+> macOS 可能会提示「无法验证开发者」。解决方法：
+> **系统设置 → 隐私与安全性 → 仍要打开**，或终端执行：
+> ```bash
+> xattr -d com.apple.quarantine yuri_scraper-darwin-arm64
+> ```
+
+---
+
+## 配置文件
+
+将 `config.yaml` 放在程序同目录，启动时自动读取。
+不放置则使用默认配置（下载到 `novels/`，输出 EPUB）。
+
+---
+
+## 常见问题
+
+**Q: 为什么 Linux/macOS 版本没有 .exe？**
+A: `.exe` 是 Windows 专属的可执行文件后缀。Linux 和 macOS 通过文件权限标记可执行，不需要后缀。
+
+**Q: 我应该下载哪个？**
+A: Windows → `windows-amd64.exe` | Intel Mac → `darwin-amd64` | M1+ Mac → `darwin-arm64` | 普通 Linux → `linux-amd64` | 树莓派 → `linux-arm64`

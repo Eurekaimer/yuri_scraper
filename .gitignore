@@ -1,0 +1,41 @@
+# 52Scraper
+
+# Downloaded novels
+novels/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# Python (legacy)
+__pycache__/
+*.py[oc]
+.venv/
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Build artifacts
+dist/
+build/
+bin/
+
+# Environment
+.env
+.env.local

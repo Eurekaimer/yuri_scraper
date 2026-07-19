@@ -1,0 +1,18 @@
+# 52Scraper Configuration
+# 修改后重启程序即可生效
+# Restart after editing
+
+# 下载目录 / Download directory
+output_dir: novels
+
+# 输出格式 / Format: txt or epub
+format: epub
+
+# 并发下载数 / Concurrent workers (0 = use speed profile default)
+concurrency: 8
+
+# 每秒请求数限制 (每个站点) / Rate limit per site (0 = use profile default)
+rate_limit: 2.0
+
+# 失败重试次数 / Retry count
+retry_count: 3
