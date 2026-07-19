@@ -50,6 +50,12 @@ func LoadHistory(outputDir string) (*History, error) {
 // Add records a new download.
 func (h *History) Add(entry HistoryEntry) error {
 	entry.Downloaded = time.Now()
+	for i := range h.Entries {
+		if h.Entries[i].BookURL == entry.BookURL {
+			h.Entries[i] = entry
+			return h.save()
+		}
+	}
 	h.Entries = append(h.Entries, entry)
 	return h.save()
 }
@@ -78,5 +84,13 @@ func (h *History) save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(h.path, data, 0644)
+	tmp := h.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, h.path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }

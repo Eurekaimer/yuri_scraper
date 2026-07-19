@@ -127,8 +127,8 @@ func levenshtein(a, b []rune) int {
 				cost = 1
 			}
 			curr[j] = min3(
-				prev[j]+1,     // deletion
-				curr[j-1]+1,   // insertion
+				prev[j]+1,      // deletion
+				curr[j-1]+1,    // insertion
 				prev[j-1]+cost, // substitution
 			)
 		}

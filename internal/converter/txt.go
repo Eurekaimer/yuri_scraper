@@ -8,14 +8,16 @@ import (
 
 // WriteTXT writes chapters to a plain text file.
 func WriteTXT(w io.Writer, chapters []Chapter) error {
-	var buf strings.Builder
 	for _, ch := range chapters {
-		buf.WriteString(fmt.Sprintf("\n%s\n\n", ch.Title))
-		buf.WriteString(ch.Content)
-		buf.WriteString("\n\n")
-		buf.WriteString(strings.Repeat("━", 40))
-		buf.WriteString("\n")
+		if _, err := fmt.Fprintf(w, "\n%s\n\n", ch.Title); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, ch.Content); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, "\n\n"+strings.Repeat("━", 40)+"\n"); err != nil {
+			return err
+		}
 	}
-	_, err := io.WriteString(w, buf.String())
-	return err
+	return nil
 }

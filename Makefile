@@ -1,4 +1,4 @@
-VERSION ?= 0.5.0
+VERSION ?= 0.6.0
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 
 .PHONY: build release clean run deps

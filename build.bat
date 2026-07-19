@@ -1,6 +1,6 @@
 @echo off
-REM YuriScraper v0.5.0 — Windows build
-set VERSION=0.5.0
+REM YuriScraper v0.6.0 — Windows build
+set VERSION=0.6.0
 echo Building YuriScraper v%VERSION%...
 go build -ldflags="-s -w -X main.Version=%VERSION%" -o bin\yuri_scraper.exe .\cmd\52scraper\
 if %ERRORLEVEL% EQU 0 (

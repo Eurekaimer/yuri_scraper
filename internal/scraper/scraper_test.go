@@ -1,9 +1,52 @@
 package scraper
 
 import (
+	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestSpeedHonorsSourceCaps(t *testing.T) {
+	e := NewEngine(DefaultConfig())
+	e.maxWorkers.Store(2)
+	e.maxRateBits.Store(math.Float64bits(1.2))
+	e.SetSpeed(SpeedFast)
+	if got := e.concurrency.Load(); got != 2 {
+		t.Fatalf("concurrency = %d, want capped value 2", got)
+	}
+	if got := float64(e.limiter.Limit()); got != 1.2 {
+		t.Fatalf("rate = %v, want capped value 1.2", got)
+	}
+}
+
+func TestRetryDelayUsesBackoff(t *testing.T) {
+	first := retryDelay(time.Second, 1, 0)
+	second := retryDelay(time.Second, 2, 0)
+	if second <= first {
+		t.Fatalf("second retry delay %v must exceed first %v", second, first)
+	}
+}
+
+func TestSaveFailedChaptersUsesBookSpecificFile(t *testing.T) {
+	dir := t.TempDir()
+	path, err := SaveFailedChapters(dir, "A/B", []FailedChapter{{Index: 1, Title: "two"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(path) != "A_B.failed.json" {
+		t.Fatalf("unexpected manifest path: %s", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "two") {
+		t.Fatalf("manifest missing chapter: %s", data)
+	}
+}
 
 func TestSpeedProfile_Concurrency(t *testing.T) {
 	tests := []struct {

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hzg/yuri_scraper/internal/search"
+	"github.com/Eurekaimer/yuri_scraper/internal/search"
 )
 
 func TestGetBookMeta_Integration(t *testing.T) {

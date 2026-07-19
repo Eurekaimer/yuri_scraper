@@ -4,17 +4,19 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
+	"github.com/Eurekaimer/yuri_scraper/internal/scraper"
+	"github.com/Eurekaimer/yuri_scraper/internal/search"
+	"github.com/Eurekaimer/yuri_scraper/internal/search/sites"
+	"github.com/Eurekaimer/yuri_scraper/internal/store"
+	"github.com/Eurekaimer/yuri_scraper/internal/tui"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/hzg/yuri_scraper/internal/scraper"
-	"github.com/hzg/yuri_scraper/internal/search"
-	"github.com/hzg/yuri_scraper/internal/search/sites"
-	"github.com/hzg/yuri_scraper/internal/store"
-	"github.com/hzg/yuri_scraper/internal/tui"
 )
 
 // Version is set at build time via -ldflags.
 var Version = "dev"
+
 func main() {
 	cfg, err := store.LoadConfig("config.yaml")
 	if err != nil {
@@ -34,6 +36,7 @@ func main() {
 	// 注册站点适配器
 	registry := search.NewRegistry()
 	registry.Register(sites.New52Shuku())
+	registry.Register(sites.NewYamibo())
 	engine := search.NewEngine(registry)
 
 	scraperEngine := scraper.NewEngine(scraper.Config{
@@ -42,6 +45,7 @@ func main() {
 		OutputDir:    cfg.OutputDir,
 		Format:       cfg.Format,
 		RetryCount:   cfg.RetryCount,
+		RetryDelay:   2 * time.Second,
 		SpeedProfile: scraper.SpeedNormal,
 	})
 	m := tui.NewModel(engine, scraperEngine, hist, Version)
