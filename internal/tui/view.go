@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Eurekaimer/yuri_scraper/internal/scraper"
+	"github.com/Eurekaimer/yuri_scraper/internal/search"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/hzg/yuri_scraper/internal/scraper"
 )
 
 func (m *Model) View() string {
@@ -15,13 +16,17 @@ func (m *Model) View() string {
 
 	w := max(m.width-4, 40)
 
-	header := BrandStyle.Render(" 52Scraper")
+	header := BrandStyle.Render(" YuriScraper")
 	if m.version != "dev" {
 		header += MutedStyle.Render(" v" + m.version)
 	}
 
 	var content string
 	switch m.section {
+	case SecSources:
+		content = m.renderSourcesContent()
+	case SecAuth:
+		content = m.renderAuthContent()
 	case SecSearch:
 		content = m.renderSearchContent(w)
 	case SecResults:
@@ -32,9 +37,41 @@ func (m *Model) View() string {
 		content = m.renderLibraryContent(w)
 	}
 
+	input := m.input.View()
+	if m.section == SecSources {
+		input = MutedStyle.Render("  先选择内容来源")
+	} else if m.section == SecAuth {
+		input = m.authInput.View()
+	} else if m.section != SecSearch {
+		input = MutedStyle.Render("  搜索: " + m.input.Value())
+	}
 	body := fmt.Sprintf("%s\n\n%s\n\n%s\n\n%s",
-		header, m.input.View(), content, m.renderStatusBar())
+		header, input, content, m.renderStatusBar())
 	return DocStyle.Render(body)
+}
+
+func (m *Model) renderSourcesContent() string {
+	var b strings.Builder
+	b.WriteString(TitleStyle.Render("SOURCE SELECT // 内容来源"))
+	b.WriteString(SubtitleStyle.Render("  j/k 移动  Enter 选择  1/2 快速选择\n\n"))
+	for i, source := range m.sources {
+		prefix, style := "  ", ListItemStyle
+		if i == m.sourceCursor {
+			prefix, style = "▸ ", SelectedItemStyle
+		}
+		access := "PUBLIC"
+		if auth, ok := source.(search.CookieAuthenticator); ok && auth.RequiresCookie() {
+			access = "COOKIE"
+		}
+		b.WriteString(fmt.Sprintf("%s%02d  %s  %s\n", prefix, i+1, style.Render(source.Name()), MutedStyle.Render(access)))
+	}
+	return b.String()
+}
+
+func (m *Model) renderAuthContent() string {
+	return TitleStyle.Render("AUTH // 百合会会话") + "\n\n" +
+		MutedStyle.Render("  请从已登录的浏览器复制 bbs.yamibo.com Cookie。Cookie 不会写入配置或历史文件。") + "\n" +
+		SubtitleStyle.Render("  Enter 确认  Esc 返回来源选择")
 }
 
 func (m *Model) renderSearchContent(w int) string {
@@ -55,7 +92,7 @@ func (m *Model) renderSearchContent(w int) string {
 func (m *Model) renderResultsContent(w int) string {
 	var b strings.Builder
 	b.WriteString(TitleStyle.Render(fmt.Sprintf("▸ %d 个结果", len(m.results))))
-	b.WriteString(SubtitleStyle.Render("  j/k移动  g/G首尾  Ctrl+D/U翻页  Enter选择  Esc返回\n"))
+	b.WriteString(SubtitleStyle.Render("  j/k移动  g/G首尾  Ctrl+D/U翻页  Enter下载  Tab或/切回输入\n"))
 
 	start, end := visibleWindow(m.cursor, len(m.results), 12)
 	for i := start; i < end; i++ {
@@ -89,6 +126,11 @@ func (m *Model) renderProgressContent(w int) string {
 	if m.progress.done {
 		if m.progress.err != nil {
 			b.WriteString(ErrorStyle.Render(fmt.Sprintf("  ✗ %v", m.progress.err)))
+		} else if m.progress.failed > 0 {
+			b.WriteString(ErrorStyle.Render("  ⚠ 部分完成，失败章节已写入清单"))
+			b.WriteString(fmt.Sprintf("\n  文件: %s\n", m.progress.outputFile))
+			b.WriteString(fmt.Sprintf("  共 %d 章 | 成功 %d | 失败 %d\n",
+				m.progress.total, m.progress.completed, m.progress.failed))
 		} else {
 			b.WriteString(SuccessStyle.Render("  ✓ 抓取完成"))
 			b.WriteString(fmt.Sprintf("\n  文件: %s\n", m.progress.outputFile))
@@ -111,7 +153,7 @@ func (m *Model) renderProgressContent(w int) string {
 	}
 
 	if len(m.progress.failedChs) > 0 {
-		b.WriteString(fmt.Sprintf("\n\n  %s 按 R 重试 %d 个失败章节",
+		b.WriteString(fmt.Sprintf("\n\n  %s 完成后按 R 重试 %d 个失败章节",
 			ErrorStyle.Render("⚠"), len(m.progress.failedChs)))
 	}
 	return b.String()
@@ -147,13 +189,21 @@ func (m *Model) renderLibraryContent(w int) string {
 
 func (m *Model) renderStatusBar() string {
 	switch m.section {
+	case SecSources:
+		return StatusBarStyle.Render(key("1/2") + " 来源  " + key("Enter") + " 选择  " + key("Ctrl+C") + " 退出")
+	case SecAuth:
+		return StatusBarStyle.Render(key("Enter") + " 使用 Cookie  " + key("Esc") + " 返回  " + key("Ctrl+C") + " 退出")
 	case SecSearch, SecResults:
 		return StatusBarStyle.Render(
-			key("Enter") + " 搜索  " + key("Tab") + " 补全  " +
-				key("Ctrl+L") + " 书库  " + key("Ctrl+C") + " 退出")
+			key("Enter") + " 搜索/下载  " + key("Tab") + " 输入⇄结果  " + key("/") + " 搜索栏  " +
+				key("Ctrl+S") + " 来源  " + key("Ctrl+L") + " 书库  " + key("Ctrl+C") + " 退出")
 	case SecProgress:
+		if m.progress.done {
+			return StatusBarStyle.Render(
+				key("Enter/Esc") + " 返回结果  " + key("R") + " 重试失败  " + key("Ctrl+C") + " 退出")
+		}
 		return StatusBarStyle.Render(
-			key("1/2/3") + " 速度档  " + key("R") + " 重试失败  " + key("Ctrl+C") + " 退出")
+			key("1/2/3") + " 速度档  " + key("Ctrl+C") + " 退出")
 	case SecLibrary:
 		return StatusBarStyle.Render(key("Esc") + " 返回  " + key("Ctrl+C") + " 退出")
 	}

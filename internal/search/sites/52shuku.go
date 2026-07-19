@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Eurekaimer/yuri_scraper/internal/search"
 	"github.com/PuerkitoBio/goquery"
-	"github.com/hzg/yuri_scraper/internal/search"
 )
 
 // Site52Shuku adapts 52shuku.net.
@@ -229,13 +229,14 @@ func (s *Site52Shuku) GetChapterList(ctx context.Context, bookURL string) ([]sea
 }
 
 var (
-	reScript    = regexp.MustCompile(`<script[\s\S]*?</script>`)
-	reHTMLTag   = regexp.MustCompile(`<[^>]+>`)
-	reBr        = regexp.MustCompile(`(?i)</p>|<br\s*/?>`)
-	reCount     = regexp.MustCompile(`共(\d+)页`)
-	reBoiler    = regexp.MustCompile(`(?i)(目录|上一页|下一页|尾页|哦豁.*|传送门.*|Tips.*|52书库App.*|阅读记录.*|加入收藏.*|关灯|护眼|字体.*|[|].*书单推荐.*)`)
-	reChapterH  = regexp.MustCompile(`第[\d零一二三四五六七八九十百千]+章\s*[^\n]*`)
+	reScript   = regexp.MustCompile(`<script[\s\S]*?</script>`)
+	reHTMLTag  = regexp.MustCompile(`<[^>]+>`)
+	reBr       = regexp.MustCompile(`(?i)</p>|<br\s*/?>`)
+	reCount    = regexp.MustCompile(`共(\d+)页`)
+	reBoiler   = regexp.MustCompile(`(?i)(目录|上一页|下一页|尾页|哦豁.*|传送门.*|Tips.*|52书库App.*|阅读记录.*|加入收藏.*|关灯|护眼|字体.*|[|].*书单推荐.*)`)
+	reChapterH = regexp.MustCompile(`第[\d零一二三四五六七八九十百千]+章\s*[^\n]*`)
 )
+
 func (s *Site52Shuku) GetChapterContent(ctx context.Context, pageURL string) (string, error) {
 	doc, err := s.doGet(ctx, pageURL)
 	if err != nil {
@@ -293,6 +294,7 @@ func isBoilerplate(line string) bool {
 	}
 	return false
 }
+
 // GetBookMeta implements search.BookMetaProvider.
 func (s *Site52Shuku) GetBookMeta(ctx context.Context, bookURL string) (*search.BookMetaDetail, error) {
 	doc, err := s.doGet(ctx, bookURL)
@@ -407,4 +409,3 @@ func detectProtagonist(desc string) string {
 	}
 	return ""
 }
-

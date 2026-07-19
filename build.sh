@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="${1:-0.5.0}"
+VERSION="${1:-0.6.0}"
 
-echo "=== 52Scraper v${VERSION} Release Builder ==="
+echo "=== YuriScraper v${VERSION} Release Builder ==="
 echo ""
 
 rm -rf dist/

@@ -9,11 +9,11 @@ import (
 
 // Config holds user configuration.
 type Config struct {
-	OutputDir   string `yaml:"output_dir"`
-	Format      string `yaml:"format"`       // "txt" or "epub"
-	Concurrency int    `yaml:"concurrency"`   // parallel chapter downloads
-	RateLimit   float64 `yaml:"rate_limit"`   // requests/sec per site
-	RetryCount  int    `yaml:"retry_count"`
+	OutputDir   string  `yaml:"output_dir"`
+	Format      string  `yaml:"format"`      // "txt" or "epub"
+	Concurrency int     `yaml:"concurrency"` // parallel chapter downloads
+	RateLimit   float64 `yaml:"rate_limit"`  // requests/sec per site
+	RetryCount  int     `yaml:"retry_count"`
 }
 
 // DefaultConfig returns sensible defaults.

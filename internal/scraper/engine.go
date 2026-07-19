@@ -2,29 +2,31 @@ package scraper
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/hzg/yuri_scraper/internal/converter"
-	"github.com/hzg/yuri_scraper/internal/search"
-	"golang.org/x/sync/semaphore"
+	"github.com/Eurekaimer/yuri_scraper/internal/converter"
+	"github.com/Eurekaimer/yuri_scraper/internal/search"
 	"golang.org/x/time/rate"
 )
 
-
-// SpeedProfile controls the aggressiveness of scraping.
+// SpeedProfile controls both worker concurrency and request rate.
 type SpeedProfile int
 
 const (
-	SpeedSlow   SpeedProfile = iota // gentle: 2 workers, 0.5 req/s
-	SpeedNormal                      // balanced: 8 workers, 2 req/s
-	SpeedFast                        // aggressive: 16 workers, 5 req/s
+	SpeedSlow SpeedProfile = iota
+	SpeedNormal
+	SpeedFast
 )
 
 func (sp SpeedProfile) concurrency() int64 {
@@ -43,9 +45,9 @@ func (sp SpeedProfile) rateLimit() float64 {
 	case SpeedSlow:
 		return 0.5
 	case SpeedFast:
-		return 5.0
+		return 5
 	default:
-		return 2.0
+		return 2
 	}
 }
 
@@ -59,6 +61,7 @@ func (sp SpeedProfile) String() string {
 		return "正常"
 	}
 }
+
 type Config struct {
 	Concurrency  int64
 	RateLimit    float64
@@ -67,11 +70,10 @@ type Config struct {
 	RetryCount   int
 	RetryDelay   time.Duration
 	SpeedProfile SpeedProfile
-	StartChapter int // 0 = from beginning
-	EndChapter   int // 0 = to end
+	StartChapter int
+	EndChapter   int
 }
 
-// ScrapeRange sets the chapter range to download.
 func (c *Config) ScrapeRange(start, end int) {
 	if start > 0 {
 		c.StartChapter = start - 1
@@ -79,19 +81,13 @@ func (c *Config) ScrapeRange(start, end int) {
 	c.EndChapter = end
 }
 
-// DefaultConfig returns sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		Concurrency:  8,
-		RateLimit:    2,
-		OutputDir:    "novels",
-		Format:       "epub",
-		RetryCount:   3,
-		RetryDelay:   2 * time.Second,
-		SpeedProfile: SpeedNormal,
+		Concurrency: 8, RateLimit: 2, OutputDir: "novels", Format: "epub",
+		RetryCount: 3, RetryDelay: 2 * time.Second, SpeedProfile: SpeedNormal,
 	}
 }
-// FailedChapter records a chapter that failed to download.
+
 type FailedChapter struct {
 	Index int    `json:"index"`
 	Title string `json:"title"`
@@ -105,194 +101,315 @@ type Progress struct {
 	ChapterURL    string
 	TotalChapters int
 	Done          bool
+	Cached        bool
 	Error         error
 	OutputFile    string
+	FailedFile    string
 }
 
-// Engine orchestrates concurrent chapter scraping.
+// Engine orchestrates a bounded worker pool. Concurrency and request rate can
+// be changed while a scrape is running.
 type Engine struct {
-	cfg     Config
-	limiter *rate.Limiter // dynamic rate limiter, updated by SetSpeed
+	cfg         Config
+	limiter     *rate.Limiter
+	concurrency atomic.Int64
+	speed       atomic.Int64
+	maxWorkers  atomic.Int64
+	maxRateBits atomic.Uint64
 }
 
 func NewEngine(cfg Config) *Engine {
-	e := &Engine{cfg: cfg}
-	rateLimit := cfg.RateLimit
-	if rateLimit <= 0 {
-		rateLimit = cfg.SpeedProfile.rateLimit()
+	defaults := DefaultConfig()
+	if cfg.OutputDir == "" {
+		cfg.OutputDir = defaults.OutputDir
 	}
-	e.limiter = rate.NewLimiter(rate.Limit(rateLimit), 1)
+	if cfg.Format == "" {
+		cfg.Format = defaults.Format
+	}
+	if cfg.RetryDelay <= 0 {
+		cfg.RetryDelay = defaults.RetryDelay
+	}
+	if cfg.RetryCount < 0 {
+		cfg.RetryCount = defaults.RetryCount
+	}
+	workers := cfg.Concurrency
+	if workers <= 0 {
+		workers = cfg.SpeedProfile.concurrency()
+	}
+	rps := cfg.RateLimit
+	if rps <= 0 {
+		rps = cfg.SpeedProfile.rateLimit()
+	}
+	e := &Engine{cfg: cfg, limiter: rate.NewLimiter(rate.Limit(rps), 1)}
+	e.speed.Store(int64(cfg.SpeedProfile))
+	e.maxWorkers.Store(64)
+	e.maxRateBits.Store(math.Float64bits(math.MaxFloat64))
+	e.concurrency.Store(workers)
 	return e
 }
 
 func (e *Engine) SetSpeed(sp SpeedProfile) {
-	e.cfg.SpeedProfile = sp
-	e.limiter.SetLimit(rate.Limit(sp.rateLimit()))
-	e.limiter.SetBurst(int(sp.concurrency() / 2))
-	if e.limiter.Burst() < 1 {
-		e.limiter.SetBurst(1)
-	}
+	e.speed.Store(int64(sp))
+	e.applySpeed(sp)
 }
 
-// ScrapeBook downloads all chapters of a book and saves as TXT or EPUB.
+func (e *Engine) applySpeed(sp SpeedProfile) {
+	workers := sp.concurrency()
+	if maximum := e.maxWorkers.Load(); maximum > 0 && workers > maximum {
+		workers = maximum
+	}
+	rps := sp.rateLimit()
+	if maximum := math.Float64frombits(e.maxRateBits.Load()); maximum > 0 && rps > maximum {
+		rps = maximum
+	}
+	e.concurrency.Store(workers)
+	e.limiter.SetLimit(rate.Limit(rps))
+	// A burst of one prevents a long idle period from becoming a request spike.
+	e.limiter.SetBurst(1)
+}
+
 func (e *Engine) ScrapeBook(ctx context.Context, adapter search.SiteAdapter, bookURL string, meta search.SearchResult) (<-chan Progress, error) {
+	e.maxWorkers.Store(64)
+	e.maxRateBits.Store(math.Float64bits(math.MaxFloat64))
+	if policy, ok := adapter.(search.ScrapePolicyProvider); ok {
+		if maximum := policy.MaxConcurrency(); maximum > 0 {
+			e.maxWorkers.Store(maximum)
+		}
+		if maximum := policy.MaxRequestsPerSecond(); maximum > 0 {
+			e.maxRateBits.Store(math.Float64bits(maximum))
+		}
+	}
+	e.applySpeed(SpeedProfile(e.speed.Load()))
 	chapters, err := adapter.GetChapterList(ctx, bookURL)
 	if err != nil {
 		return nil, fmt.Errorf("get chapter list: %w", err)
 	}
-	// Apply chapter range
-	if e.cfg.EndChapter > 0 || e.cfg.StartChapter > 0 {
-		start := e.cfg.StartChapter
-		end := e.cfg.EndChapter
-		if end == 0 || end > len(chapters) {
-			end = len(chapters)
-		}
-		if start < len(chapters) {
-			chapters = chapters[start:end]
-		}
-	}
+	chapters = e.applyRange(chapters)
 	if len(chapters) == 0 {
 		return nil, fmt.Errorf("no chapters in range")
 	}
-	ch := make(chan Progress, len(chapters))
-	concurrency := e.cfg.Concurrency
-	if concurrency <= 0 {
-		concurrency = e.cfg.SpeedProfile.concurrency()
-	}
-	sem := semaphore.NewWeighted(concurrency)
-	// Use engine's shared limiter for dynamic speed control
-	limiter := e.limiter
 
-	// Ordered storage for chapters
-	type result struct {
-		index   int
-		content string
-		err     error
+	progress := make(chan Progress, min(len(chapters)+2, 256))
+	go e.run(ctx, adapter, meta, chapters, progress)
+	return progress, nil
+}
+
+func (e *Engine) applyRange(chapters []search.Chapter) []search.Chapter {
+	start, end := e.cfg.StartChapter, e.cfg.EndChapter
+	if start < 0 {
+		start = 0
 	}
-	results := make(chan result, len(chapters))
+	if end <= 0 || end > len(chapters) {
+		end = len(chapters)
+	}
+	if start >= end {
+		return nil
+	}
+	return chapters[start:end]
+}
+
+type chapterJob struct {
+	index   int
+	chapter search.Chapter
+}
+
+type chapterResult struct {
+	index  int
+	path   string
+	cached bool
+	err    error
+}
+
+func (e *Engine) run(ctx context.Context, adapter search.SiteAdapter, meta search.SearchResult, chapters []search.Chapter, progress chan<- Progress) {
+	defer close(progress)
+
+	cacheDir := filepath.Join(e.cfg.OutputDir, ".cache", shortHash(meta.BookURL))
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		progress <- Progress{ChapterIndex: -1, TotalChapters: len(chapters), Error: fmt.Errorf("create checkpoint directory: %w", err)}
+		return
+	}
+
+	jobs := make(chan chapterJob)
+	results := make(chan chapterResult, min(len(chapters), 256))
+	maxWorkers := max64(16, e.cfg.Concurrency)
+	if maxWorkers > 64 {
+		maxWorkers = 64
+	}
 
 	var wg sync.WaitGroup
+	for workerID := int64(0); workerID < maxWorkers; workerID++ {
+		wg.Add(1)
+		go func(id int64) {
+			defer wg.Done()
+			for {
+				if err := e.waitUntilEnabled(ctx, id); err != nil {
+					return
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case job, ok := <-jobs:
+					if !ok {
+						return
+					}
+					results <- e.fetchChapter(ctx, adapter, cacheDir, job)
+				}
+			}
+		}(workerID)
+	}
 
 	go func() {
+		defer close(jobs)
 		for i, chapter := range chapters {
-			wg.Add(1)
-			go func(idx int, chap search.Chapter) {
-				defer wg.Done()
-
-				// Acquire semaphore
-				if err := sem.Acquire(ctx, 1); err != nil {
-					results <- result{index: idx, err: err}
-					return
-				}
-				defer sem.Release(1)
-
-				// Wait for rate limiter
-				if err := limiter.Wait(ctx); err != nil {
-					results <- result{index: idx, err: err}
-					return
-				}
-
-				// Download with retries
-				var content string
-				var lastErr error
-				for attempt := 0; attempt <= e.cfg.RetryCount; attempt++ {
-					if attempt > 0 {
-						select {
-						case <-ctx.Done():
-							results <- result{index: idx, err: ctx.Err()}
-							return
-						case <-time.After(e.cfg.RetryDelay):
-						}
-					}
-
-					content, lastErr = adapter.GetChapterContent(ctx, chap.URL)
-					if lastErr == nil {
-						break
-					}
-					log.Printf("[retry] chapter %d attempt %d: %v", idx+1, attempt+1, lastErr)
-				}
-
-				results <- result{index: idx, content: content, err: lastErr}
-			}(i, chapter)
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- chapterJob{index: i, chapter: chapter}:
+			}
 		}
-
+	}()
+	go func() {
 		wg.Wait()
 		close(results)
 	}()
 
-	// Goroutine to save results and emit progress
-	go func() {
-		defer close(ch)
-
-		// Collect ordered results
-		collected := make(map[int]string)
-		var lastErr error
-		total := len(chapters)
-	for r := range results {
-		if r.err != nil {
-			ch <- Progress{
-				ChapterIndex:  r.index,
-				ChapterTitle:  chapters[r.index].Title,
-				ChapterURL:    chapters[r.index].URL,
-				TotalChapters: total,
-				Error:         r.err,
+	paths := make(map[int]string, len(chapters))
+	failed := make([]FailedChapter, 0)
+	for result := range results {
+		chapter := chapters[result.index]
+		if result.err != nil {
+			failed = append(failed, FailedChapter{
+				Index: result.index, Title: chapter.Title, URL: chapter.URL, Error: result.err.Error(),
+			})
+			progress <- Progress{
+				ChapterIndex: result.index, ChapterTitle: chapter.Title, ChapterURL: chapter.URL,
+				TotalChapters: len(chapters), Error: result.err,
 			}
-			lastErr = r.err
 			continue
 		}
-		collected[r.index] = r.content
-
-		ch <- Progress{
-			ChapterIndex:  r.index,
-			ChapterTitle:  chapters[r.index].Title,
-			TotalChapters: total,
-			Done:          true,
+		paths[result.index] = result.path
+		progress <- Progress{
+			ChapterIndex: result.index, ChapterTitle: chapter.Title,
+			TotalChapters: len(chapters), Done: true, Cached: result.cached,
 		}
 	}
 
-	if lastErr != nil {
-		ch <- Progress{
-			ChapterIndex:  -1,
-			TotalChapters: total,
-			Error:         fmt.Errorf("下载未完成: %w", lastErr),
-		}
+	if err := ctx.Err(); err != nil {
+		progress <- Progress{ChapterIndex: -1, TotalChapters: len(chapters), Error: err}
 		return
 	}
 
-	outputFile, err := e.writeOutput(adapter, meta, chapters, collected)
+	outputFile, err := e.writeOutput(ctx, adapter, meta, chapters, paths, failed)
 	if err != nil {
-		ch <- Progress{
-			ChapterIndex:  -1,
-			TotalChapters: total,
-			Error:         fmt.Errorf("write output: %w", err),
-		}
+		progress <- Progress{ChapterIndex: -1, TotalChapters: len(chapters), Error: fmt.Errorf("write output: %w", err)}
 		return
 	}
-	ch <- Progress{
-		ChapterIndex:  -1,
-		TotalChapters: total,
-		OutputFile:    outputFile,
-	}
-	}()
 
-	return ch, nil
+	failedFile := ""
+	if len(failed) > 0 {
+		failedFile, err = SaveFailedChapters(e.cfg.OutputDir, meta.Title, failed)
+		if err != nil {
+			progress <- Progress{ChapterIndex: -1, TotalChapters: len(chapters), OutputFile: outputFile, Error: fmt.Errorf("save failed chapters: %w", err)}
+			return
+		}
+	} else {
+		_ = os.RemoveAll(cacheDir)
+		_ = os.Remove(filepath.Join(e.cfg.OutputDir, safeFilename(meta.Title)+".failed.json"))
+	}
+
+	progress <- Progress{ChapterIndex: -1, TotalChapters: len(chapters), OutputFile: outputFile, FailedFile: failedFile}
 }
 
-func (e *Engine) writeOutput(adapter search.SiteAdapter, meta search.SearchResult, chapters []search.Chapter, content map[int]string) (string, error) {
-	if err := os.MkdirAll(e.cfg.OutputDir, 0755); err != nil {
+func (e *Engine) waitUntilEnabled(ctx context.Context, workerID int64) error {
+	for workerID >= e.concurrency.Load() {
+		timer := time.NewTimer(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil
+}
+
+func (e *Engine) fetchChapter(ctx context.Context, adapter search.SiteAdapter, cacheDir string, job chapterJob) chapterResult {
+	path := filepath.Join(cacheDir, shortHash(job.chapter.URL)+".txt")
+	if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+		return chapterResult{index: job.index, path: path, cached: true}
+	}
+
+	var content string
+	var lastErr error
+	for attempt := 0; attempt <= e.cfg.RetryCount; attempt++ {
+		if attempt > 0 {
+			delay := retryDelay(e.cfg.RetryDelay, attempt, job.index)
+			select {
+			case <-ctx.Done():
+				return chapterResult{index: job.index, err: ctx.Err()}
+			case <-time.After(delay):
+			}
+		}
+		if err := e.limiter.Wait(ctx); err != nil {
+			return chapterResult{index: job.index, err: err}
+		}
+		content, lastErr = adapter.GetChapterContent(ctx, job.chapter.URL)
+		if lastErr == nil && strings.TrimSpace(content) != "" {
+			break
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("empty chapter content")
+		}
+		log.Printf("[retry] chapter %d attempt %d: %v", job.index+1, attempt+1, lastErr)
+	}
+	if lastErr != nil {
+		return chapterResult{index: job.index, err: lastErr}
+	}
+
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+		return chapterResult{index: job.index, err: err}
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return chapterResult{index: job.index, err: err}
+	}
+	return chapterResult{index: job.index, path: path}
+}
+
+func retryDelay(base time.Duration, attempt, index int) time.Duration {
+	delay := base << min(attempt-1, 4)
+	if delay > 30*time.Second {
+		delay = 30 * time.Second
+	}
+	return delay + time.Duration((index+attempt*17)%750)*time.Millisecond
+}
+
+func (e *Engine) writeOutput(ctx context.Context, adapter search.SiteAdapter, meta search.SearchResult, chapters []search.Chapter, paths map[int]string, failed []FailedChapter) (string, error) {
+	if err := os.MkdirAll(e.cfg.OutputDir, 0o755); err != nil {
 		return "", fmt.Errorf("create output dir: %w", err)
 	}
 
-	// Safe filename
-	fname := safeFilename(meta.Title)
-	outPath := filepath.Join(e.cfg.OutputDir, fname)
-
-	// Concatenate all page content and split by chapter markers
 	var rawText strings.Builder
-	for i := range len(chapters) {
-		if c, ok := content[i]; ok {
-			rawText.WriteString(c)
-			rawText.WriteString("\n")
+	failedByIndex := make(map[int]FailedChapter, len(failed))
+	for _, item := range failed {
+		failedByIndex[item.Index] = item
+	}
+	for i, chapter := range chapters {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if path := paths[i]; path != "" {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return "", err
+			}
+			rawText.Write(data)
+			rawText.WriteByte('\n')
+			continue
+		}
+		if item, ok := failedByIndex[i]; ok {
+			fmt.Fprintf(&rawText, "\n第%d章 %s\n【下载失败：%s】\n", i+1, chapter.Title, item.Error)
 		}
 	}
 	ordered := converter.SplitChapters(rawText.String(), 1)
@@ -300,12 +417,9 @@ func (e *Engine) writeOutput(adapter search.SiteAdapter, meta search.SearchResul
 		return "", fmt.Errorf("no content to write")
 	}
 
-	// Fetch detailed book metadata if available
-	description := meta.Description
-	protagonist := meta.Protagonist
-	tags := meta.Tags
+	description, protagonist, tags := meta.Description, meta.Protagonist, meta.Tags
 	if provider, ok := adapter.(search.BookMetaProvider); ok {
-		detail, err := provider.GetBookMeta(context.Background(), meta.BookURL)
+		detail, err := provider.GetBookMeta(ctx, meta.BookURL)
 		if err == nil && detail != nil {
 			if detail.Description != "" {
 				description = detail.Description
@@ -320,84 +434,93 @@ func (e *Engine) writeOutput(adapter search.SiteAdapter, meta search.SearchResul
 	}
 
 	bookMeta := converter.BookMeta{
-		Title:       meta.Title,
-		Author:      orDefault(meta.Author, "Unknown"),
-		Description: description,
-		Protagonist: protagonist,
-		Tags:        tags,
-		Language:    "zh-CN",
-		Chapters:    ordered,
+		Title: meta.Title, Author: orDefault(meta.Author, "Unknown"), Description: description,
+		Protagonist: protagonist, Tags: tags, Language: "zh-CN", Chapters: ordered,
 	}
-
-	var outFile string
-	switch e.cfg.Format {
-	case "epub":
-		outFile = outPath + ".epub"
-		f, err := os.Create(outFile)
-		if err != nil {
-			return "", fmt.Errorf("create epub: %w", err)
-		}
-		defer f.Close()
-		if err := converter.WriteEPUB(f, bookMeta); err != nil {
-			return "", fmt.Errorf("write epub: %w", err)
-		}
-	default:
-		outFile = outPath + ".txt"
-		f, err := os.Create(outFile)
-		if err != nil {
-			return "", fmt.Errorf("create txt: %w", err)
-		}
-		defer f.Close()
-		if err := converter.WriteTXT(f, ordered); err != nil {
-			return "", fmt.Errorf("write txt: %w", err)
-		}
+	ext := ".txt"
+	if e.cfg.Format == "epub" {
+		ext = ".epub"
 	}
-
+	outFile := filepath.Join(e.cfg.OutputDir, safeFilename(meta.Title)+ext)
+	tmpFile := outFile + ".tmp"
+	f, err := os.Create(tmpFile)
+	if err != nil {
+		return "", err
+	}
+	if ext == ".epub" {
+		err = converter.WriteEPUB(f, bookMeta)
+	} else {
+		err = converter.WriteTXT(f, ordered)
+	}
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(tmpFile)
+		return "", err
+	}
+	if err := os.Rename(tmpFile, outFile); err != nil {
+		_ = os.Remove(tmpFile)
+		return "", err
+	}
 	log.Printf("Saved: %s (%d chapters)", outFile, len(ordered))
 	return outFile, nil
 }
 
-// RetryFailed attempts to re-download previously failed chapters.
-func (e *Engine) RetryFailed(ctx context.Context, failed []FailedChapter) {
-	for _, fc := range failed {
-		// Simple retry — fetch the chapter again
-		// In a full implementation, this would use the adapter
-		log.Printf("[retry] chapter %d: %s (%s)", fc.Index+1, fc.Title, fc.URL)
-	}
-}
-
-// SaveFailedChapters writes failed chapter info to .failed.json in the output directory.
-func SaveFailedChapters(outputDir, bookTitle string, failed []FailedChapter) error {
+// SaveFailedChapters writes a book-specific retry manifest and returns its path.
+func SaveFailedChapters(outputDir, bookTitle string, failed []FailedChapter) (string, error) {
 	if len(failed) == 0 {
-		return nil
+		return "", nil
 	}
-	path := filepath.Join(outputDir, ".failed.json")
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return "", err
+	}
+	path := filepath.Join(outputDir, safeFilename(bookTitle)+".failed.json")
 	data, err := json.MarshalIndent(failed, "", "  ")
 	if err != nil {
-		return err
+		return "", err
 	}
-	return os.WriteFile(path, data, 0644)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return path, nil
 }
 
 func safeFilename(s string) string {
-	// Replace problematic characters
-	repl := map[rune]rune{
-		'/': '_', '\\': '_', ':': '_', '*': '_',
-		'?': '_', '"': '_', '<': '_', '>': '_', '|': '_',
-	}
-	return strings.Map(func(r rune) rune {
-		if r, ok := repl[r]; ok {
-			return r
+	repl := map[rune]rune{'/': '_', '\\': '_', ':': '_', '*': '_', '?': '_', '"': '_', '<': '_', '>': '_', '|': '_'}
+	cleaned := strings.Map(func(r rune) rune {
+		if v, ok := repl[r]; ok {
+			return v
 		}
 		return r
 	}, s)
+	cleaned = strings.Trim(cleaned, " .")
+	if cleaned == "" {
+		return "book"
+	}
+	return cleaned
 }
 
+func shortHash(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:8])
+}
 
-func orDefault(s, def string) string {
+func max64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+func orDefault(s, fallback string) string {
 	if s == "" {
-		return def
+		return fallback
 	}
 	return s
 }
-

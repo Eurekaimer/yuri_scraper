@@ -13,10 +13,10 @@ func TestSearchURL(t *testing.T) {
 	q := url.QueryEscape("秦寺")
 	u := fmt.Sprintf("%s/so/search.php?q=%s", s.BaseURL(), q)
 	t.Logf("Search URL: %s", u)
-	
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	
+
 	doc, err := s.doGet(ctx, u)
 	if err != nil {
 		// Try alternative encoding
@@ -27,7 +27,7 @@ func TestSearchURL(t *testing.T) {
 			t.Fatalf("Both URLs failed: %v", err)
 		}
 	}
-	
+
 	count := doc.Find("article.excerpt").Length()
 	t.Logf("Found %d search results", count)
 }

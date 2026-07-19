@@ -44,6 +44,20 @@ type SiteAdapter interface {
 	GetChapterContent(ctx context.Context, chapterURL string) (string, error)
 }
 
+// CookieAuthenticator is implemented by sources that require an authenticated
+// browser session. The TUI collects the cookie without persisting it to disk.
+type CookieAuthenticator interface {
+	RequiresCookie() bool
+	HasCookie() bool
+	SetCookie(cookie string)
+}
+
+// ScrapePolicyProvider lets a sensitive source cap the global speed profiles.
+type ScrapePolicyProvider interface {
+	MaxConcurrency() int64
+	MaxRequestsPerSecond() float64
+}
+
 // BookMetaProvider is an optional interface for adapters that can fetch detailed book metadata.
 // SiteAdapter implementations MAY also implement this for richer EPUB output.
 type BookMetaProvider interface {

@@ -1,122 +1,101 @@
-[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&style=flat)](https://go.dev/)
-[![Version](https://img.shields.io/badge/v0.5.0-7C3AED?style=flat)](https://github.com/hzg/yuri_scraper)
-[![License](https://img.shields.io/badge/MIT-green?style=flat)](LICENSE)
-[![Platform](https://img.shields.io/badge/Windows%7CLinux%7CmacOS-blue?style=flat)](https://github.com/hzg/yuri_scraper/releases)
+[![Go](https://img.shields.io/badge/Go-1.26.5+-00ADD8?logo=go&style=flat)](https://go.dev/)
+[![Version](https://img.shields.io/badge/v0.6.0-7C3AED?style=flat)](https://github.com/Eurekaimer/yuri_scraper/releases)
+[![CI](https://github.com/Eurekaimer/yuri_scraper/actions/workflows/ci.yml/badge.svg)](https://github.com/Eurekaimer/yuri_scraper/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-green?style=flat)](LICENSE)
 
-> 终端里的电子书管家 —— 搜索、抓取、精校，一气呵成。
+# YuriScraper
 
-**YuriScraper** 是一个基于终端的 TUI 小说抓取工具，专为 [52书库](https://www.52shuku.net/) 设计。支持模糊搜索、多级并发下载、EPUB/TXT 输出，内置繁简转换与自动标签系统。
+> 一个本地优先、支持多来源的终端电子书下载器。
 
-[English](README.md)
+YuriScraper 是使用 Go 与 Bubble Tea 编写的键盘流 TUI。v0.6.0 开始整合
+52书库和百合会，并加入断点缓存、失败后部分输出、指数退避，以及可以在
+下载过程中真正改变并发数的有界 worker pool。
 
----
+[English](README.md) · [架构说明](ARCHITECTURE.md)
 
-## 功能
+## 内容来源
 
-- **TUI 界面** — 基于 [Bubble Tea](https://github.com/charmbracelet/bubbletea)，全键盘操作，单屏布局不跳转
-- **模糊搜索** — 字符重叠 + N-gram + Levenshtein 编辑距离，中文匹配精准
-- **三级速度控制** — 慢速/正常/快速，抓取中按 `1/2/3` 实时切换
-- **并发下载** — Worker Pool + 令牌桶限流，兼顾速度与礼貌
-- **元数据抓取** — 自动提取作者、简介、主角、标签、完结状态
-- **EPUB 3 输出** — 完整元数据（`dc:subject`、`dc:description`、主角信息）
-- **繁简自动转换** — 检测并转为简体中文，统一阅读体验
-- **智能标签** — 从书名和简介自动识别 20+ 分类（总裁、修仙、GL、百合…）
-- **失败重试** — 失败章节记录到 `.failed.json`，按 `R` 一键重试
-- **下载历史** — 本地 `.history.json`，避免重复下载
+| 来源 | 访问方式 | v0.6 支持情况 |
+|---|---|---|
+| 52书库 | 公开访问 | 搜索、元数据、章节下载 |
+| 百合会 | Cookie | 论坛搜索、目录/电梯识别、楼层正文下载 |
 
----
+百合会 Cookie 直接在 TUI 内粘贴，只保留在本次运行的内存中，不会写入
+YAML、下载历史或日志。v0.6 优先支持带目录/电梯的帖子；无目录帖子目前
+支持首屏作者正文回退，跨页作者楼层扫描仍在继续完善。
 
-## 快速开始
+## v0.6.0 重点改动
 
-### 前置要求
+- 启动时使用 `1/2` 选择 52书库或百合会；
+- 修复下载一本书后无法回到原搜索结果列表的问题；
+- `Tab/Shift+Tab` 在输入栏和结果栏之间切换，`/` 随时聚焦搜索栏；
+- 速度档位同时控制 worker 数与请求速率；
+- 每次重试同样经过限速，并使用指数退避和随机抖动；
+- 成功章节写入 `novels/.cache/`，避免整本正文长期堆在内存中；
+- 某些章节失败时仍然生成可阅读文件，并保存 `书名.failed.json`；
+- 下载完成后按 `R` 只重新请求失败章节，成功章节直接命中缓存；
+- 下载历史去重并采用原子写入；
+- 二进制改由 GitHub Releases 构建，不再提交到 Git 仓库。
 
-- [Go](https://go.dev/dl/) 1.26+
+## 安装
 
-### 安装 & 运行
+推荐从 [GitHub Releases](https://github.com/Eurekaimer/yuri_scraper/releases)
+下载单文件程序。Windows 使用 `yuri-scraper-windows-amd64.exe`，不需要
+安装 Python、Java 或额外运行时。
+
+从源码构建：
 
 ```bash
-git clone https://github.com/hzg/yuri_scraper.git
+git clone https://github.com/Eurekaimer/yuri_scraper.git
 cd yuri_scraper
-go mod tidy
-go build -o yuri_scraper ./cmd/yuri_scraper/
-./yuri_scraper
+go build -trimpath -ldflags="-s -w -X main.Version=0.6.0" -o yuri-scraper ./cmd/yuri_scraper/
+./yuri-scraper
 ```
 
-或者直接 `go run ./cmd/yuri_scraper/`。
+## 键位
 
-### 操作说明
+| 界面 | 键位 |
+|---|---|
+| 来源选择 | `1/2`、`j/k`、`Enter` |
+| 百合会认证 | 粘贴 Cookie、`Enter` 确认、`Esc` 返回 |
+| 搜索栏 | 输入关键词、`Enter` 搜索、`Tab` 或 `↓` 进入结果 |
+| 结果栏 | `j/k`、`g/G`、`Ctrl+D/U`、`Enter` 下载 |
+| 输入栏 ⇄ 结果栏 | `Tab/Shift+Tab`；`/` 聚焦搜索栏 |
+| 下载中 | `1/2/3` 切换速度，`R` 重试失败章节 |
+| 全局 | `Ctrl+S` 来源、`Ctrl+L` 书库、`Ctrl+C` 退出 |
 
-| 场景 | 按键 |
-|------|------|
-| 搜索输入 | 直接输入 → `Enter` 搜索 → `Tab` 补全 |
-| 结果列表 | `j/k` 移动 `g/G` 首尾 `Ctrl+D/U` 翻页 `Enter` 选择 |
-| 抓取中 | `1/2/3` 切换速度 `R` 重试失败章节 |
-| 书库 | `Ctrl+L` 打开 `Esc` 返回 |
-| 全局 | `Ctrl+C` 退出 |
+下载结束后按 `Esc` 或 `Enter` 会返回原来的搜索结果，不会清空作者搜索
+得到的多本小说，也不会把焦点卡在输入栏。
 
-### 配置
-
-编辑 `config.yaml`：
+## 配置
 
 ```yaml
-output_dir: novels      # 下载目录
-format: epub            # 输出格式：txt / epub
-concurrency: 8          # 并发数（0 = 用速度档位默认值）
-rate_limit: 2.0         # 每秒请求数（0 = 用速度档位默认值）
-retry_count: 3          # 失败重试次数
+output_dir: novels
+format: epub
+concurrency: 8
+rate_limit: 2.0
+retry_count: 3
 ```
 
-速度档位：
+配置决定启动时的默认值；下载过程中按 `1/2/3` 会同时调整并发和速率。
+百合会会额外限制为最多 2 个 worker、1.2 请求/秒，避免把 52书库的快速档
+直接套到论坛上。
 
-| 档位 | 并发 | 限速 | 热键 |
-|------|------|------|------|
-| 慢速 | 2 | 0.5 req/s | `1` |
-| 正常 | 8 | 2 req/s | `2` |
-| 快速 | 16 | 5 req/s | `3` |
-
----
-
-## 开发
+## 开发与发布
 
 ```bash
-go test -short ./...     # 单元测试
-go test ./...            # 全部测试（含网络）
-go vet ./...             # 代码检查
+go test -short ./...
+go vet ./...
+make build
 ```
 
-### 项目结构
+推送 `v*` 标签后，GitHub Actions 会构建 Windows、Linux 和 macOS 的
+amd64/arm64 产物，并自动附加到 Release。
 
-```
-cmd/yuri_scraper/        # 程序入口
-internal/
-  tui/                # Bubble Tea 界面（单屏布局）
-  search/             # 模糊搜索 + 站点适配器
-    sites/            # 52书库适配器
-  scraper/            # 并发抓取引擎 + 速度控制
-  converter/          # EPUB/TXT + 繁简转换 + 标签
-  store/              # 配置 + 下载历史
-```
+## 使用边界
 
----
-
-## Release
-
-预编译二进制在 [Releases](https://github.com/hzg/yuri_scraper/releases)。
-
-```bash
-make release    # 全平台交叉编译
-# 或 ./build.sh
-```
-
-产物：
-
-- `yuri_scraper-windows-amd64.exe`
-- `yuri_scraper-linux-amd64`（NixOS 可用）
-- `yuri_scraper-linux-arm64`
-- `yuri_scraper-darwin-amd64`
-- `yuri_scraper-darwin-arm64`
-
----
+项目用于个人阅读整理。请使用保守的请求速率，遵守网站规则和版权要求，
+不要绕过访问限制，也不要传播下载内容。
 
 ## License
 

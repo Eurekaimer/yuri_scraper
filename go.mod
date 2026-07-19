@@ -1,4 +1,4 @@
-module github.com/hzg/yuri_scraper
+module github.com/Eurekaimer/yuri_scraper
 
 go 1.26.5
 
