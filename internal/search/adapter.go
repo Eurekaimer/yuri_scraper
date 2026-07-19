@@ -1,6 +1,9 @@
 package search
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // SearchResult represents a book found by a site adapter.
 type SearchResult struct {
@@ -56,6 +59,64 @@ type CookieAuthenticator interface {
 type ScrapePolicyProvider interface {
 	MaxConcurrency() int64
 	MaxRequestsPerSecond() float64
+}
+
+// ChapterResolveMode selects how a forum-like source turns a thread into an
+// ordered chapter plan. Public book sites can ignore this optional protocol.
+type ChapterResolveMode string
+
+const (
+	ChapterModeAuto    ChapterResolveMode = "auto"
+	ChapterModeCatalog ChapterResolveMode = "catalog"
+	ChapterModeAuthor  ChapterResolveMode = "author"
+)
+
+// ChapterCandidate describes a possible catalog/elevator found in a thread.
+// Preview is intentionally small so a TUI can present candidates without
+// retaining chapter bodies.
+type ChapterCandidate struct {
+	Source   string
+	Chapters []Chapter
+	Score    int
+	Preview  []string
+}
+
+// ChapterPlanOptions controls an optional, source-specific planning pass.
+// CheckpointPath must never contain credentials. ContentSink lets a resolver
+// place already-fetched post bodies directly in the scraper checkpoint cache.
+type ChapterPlanOptions struct {
+	Mode             ChapterResolveMode
+	Author           string
+	MaxScanPages     int
+	MinPostChars     int
+	CatalogCandidate int
+	CheckpointPath   string
+	ContentSink      func(Chapter, string) error
+	OnProgress       func(ChapterPlanProgress)
+}
+
+type ChapterPlanProgress struct {
+	Strategy       ChapterResolveMode
+	ScannedPages   int
+	FoundChapters  int
+	CheckpointHits int
+	StartedAt      time.Time
+}
+
+type ChapterPlan struct {
+	Chapters       []Chapter
+	Candidates     []ChapterCandidate
+	Strategy       ChapterResolveMode
+	Author         string
+	TotalPages     int
+	ScannedPages   int
+	CheckpointHits int
+}
+
+// ChapterPlanner is an optional richer protocol for sources whose chapter
+// structure must be resolved from catalogs or author posts.
+type ChapterPlanner interface {
+	PlanChapters(context.Context, string, ChapterPlanOptions) (ChapterPlan, error)
 }
 
 // BookMetaProvider is an optional interface for adapters that can fetch detailed book metadata.

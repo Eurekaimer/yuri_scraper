@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,6 +170,12 @@ func (e *Engine) applySpeed(sp SpeedProfile) {
 }
 
 func (e *Engine) ScrapeBook(ctx context.Context, adapter search.SiteAdapter, bookURL string, meta search.SearchResult) (<-chan Progress, error) {
+	return e.ScrapeBookWithOptions(ctx, adapter, bookURL, meta, search.ChapterPlanOptions{})
+}
+
+// ScrapeBookWithOptions uses a source's optional planning protocol while
+// keeping the common SiteAdapter contract unchanged for ordinary book sites.
+func (e *Engine) ScrapeBookWithOptions(ctx context.Context, adapter search.SiteAdapter, bookURL string, meta search.SearchResult, options search.ChapterPlanOptions) (<-chan Progress, error) {
 	e.maxWorkers.Store(64)
 	e.maxRateBits.Store(math.Float64bits(math.MaxFloat64))
 	if policy, ok := adapter.(search.ScrapePolicyProvider); ok {
@@ -180,7 +187,11 @@ func (e *Engine) ScrapeBook(ctx context.Context, adapter search.SiteAdapter, boo
 		}
 	}
 	e.applySpeed(SpeedProfile(e.speed.Load()))
-	chapters, err := adapter.GetChapterList(ctx, bookURL)
+	cacheDir := filepath.Join(e.cfg.OutputDir, ".cache", shortHash(bookCacheKey(adapter.Name(), bookURL)))
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create checkpoint directory: %w", err)
+	}
+	chapters, err := e.resolveChapters(ctx, adapter, bookURL, cacheDir, options)
 	if err != nil {
 		return nil, fmt.Errorf("get chapter list: %w", err)
 	}
@@ -190,8 +201,30 @@ func (e *Engine) ScrapeBook(ctx context.Context, adapter search.SiteAdapter, boo
 	}
 
 	progress := make(chan Progress, min(len(chapters)+2, 256))
-	go e.run(ctx, adapter, meta, chapters, progress)
+	go e.run(ctx, adapter, meta, chapters, cacheDir, progress)
 	return progress, nil
+}
+
+func (e *Engine) resolveChapters(ctx context.Context, adapter search.SiteAdapter, bookURL, cacheDir string, options search.ChapterPlanOptions) ([]search.Chapter, error) {
+	planner, ok := adapter.(search.ChapterPlanner)
+	if !ok {
+		return adapter.GetChapterList(ctx, bookURL)
+	}
+	options.CheckpointPath = filepath.Join(cacheDir, "chapter-plan.json")
+	upstreamSink := options.ContentSink
+	options.ContentSink = func(chapter search.Chapter, content string) error {
+		if upstreamSink != nil {
+			if err := upstreamSink(chapter, content); err != nil {
+				return err
+			}
+		}
+		return writeChapterCheckpoint(cacheDir, chapter.URL, content)
+	}
+	plan, err := planner.PlanChapters(ctx, bookURL, options)
+	if err != nil {
+		return nil, err
+	}
+	return plan.Chapters, nil
 }
 
 func (e *Engine) applyRange(chapters []search.Chapter) []search.Chapter {
@@ -220,16 +253,16 @@ type chapterResult struct {
 	err    error
 }
 
-func (e *Engine) run(ctx context.Context, adapter search.SiteAdapter, meta search.SearchResult, chapters []search.Chapter, progress chan<- Progress) {
+func (e *Engine) run(ctx context.Context, adapter search.SiteAdapter, meta search.SearchResult, chapters []search.Chapter, cacheDir string, progress chan<- Progress) {
 	defer close(progress)
 
-	cacheDir := filepath.Join(e.cfg.OutputDir, ".cache", shortHash(meta.BookURL))
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		progress <- Progress{ChapterIndex: -1, TotalChapters: len(chapters), Error: fmt.Errorf("create checkpoint directory: %w", err)}
 		return
 	}
 
 	jobs := make(chan chapterJob)
+	feedingDone := make(chan struct{})
 	results := make(chan chapterResult, min(len(chapters), 256))
 	maxWorkers := max64(16, e.cfg.Concurrency)
 	if maxWorkers > 64 {
@@ -242,7 +275,7 @@ func (e *Engine) run(ctx context.Context, adapter search.SiteAdapter, meta searc
 		go func(id int64) {
 			defer wg.Done()
 			for {
-				if err := e.waitUntilEnabled(ctx, id); err != nil {
+				if err := e.waitUntilEnabled(ctx, id, feedingDone); err != nil {
 					return
 				}
 				select {
@@ -259,7 +292,10 @@ func (e *Engine) run(ctx context.Context, adapter search.SiteAdapter, meta searc
 	}
 
 	go func() {
-		defer close(jobs)
+		defer func() {
+			close(jobs)
+			close(feedingDone)
+		}()
 		for i, chapter := range chapters {
 			select {
 			case <-ctx.Done():
@@ -320,13 +356,16 @@ func (e *Engine) run(ctx context.Context, adapter search.SiteAdapter, meta searc
 	progress <- Progress{ChapterIndex: -1, TotalChapters: len(chapters), OutputFile: outputFile, FailedFile: failedFile}
 }
 
-func (e *Engine) waitUntilEnabled(ctx context.Context, workerID int64) error {
+func (e *Engine) waitUntilEnabled(ctx context.Context, workerID int64, feedingDone <-chan struct{}) error {
 	for workerID >= e.concurrency.Load() {
 		timer := time.NewTimer(50 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return ctx.Err()
+		case <-feedingDone:
+			timer.Stop()
+			return context.Canceled
 		case <-timer.C:
 		}
 	}
@@ -510,6 +549,31 @@ func safeFilename(s string) string {
 func shortHash(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:8])
+}
+
+func writeChapterCheckpoint(cacheDir, chapterURL, content string) error {
+	path := filepath.Join(cacheDir, shortHash(chapterURL)+".txt")
+	if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+		return nil
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func bookCacheKey(sourceName, rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err == nil {
+		parsed.Fragment = ""
+		rawURL = parsed.String()
+	}
+	return sourceName + "\n" + rawURL
 }
 
 func max64(a, b int64) int64 {

@@ -3,6 +3,7 @@ package store
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -104,6 +105,31 @@ func TestSaveAndLoadRoundtrip(t *testing.T) {
 	}
 	if loaded.Concurrency != cfg.Concurrency {
 		t.Errorf("Concurrency roundtrip: %d != %d", loaded.Concurrency, cfg.Concurrency)
+	}
+}
+
+func TestLoadConfigMergesMissingYamiboDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("output_dir: books\nformat: txt\nconcurrency: 4\nrate_limit: 1\nretry_count: 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Yamibo.MaxConcurrency != 2 || cfg.Yamibo.RateLimit != 1.2 || cfg.Yamibo.MaxScanPages != 10 || cfg.Yamibo.MinPostChars != 80 {
+		t.Fatalf("missing defaults were not merged: %#v", cfg.Yamibo)
+	}
+}
+
+func TestLoadConfigRejectsUnsafeYamiboRate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := "output_dir: books\nformat: txt\nconcurrency: 4\nrate_limit: 1\nretry_count: 2\nyamibo:\n  rate_limit: 2.5\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "不超过 1.2") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

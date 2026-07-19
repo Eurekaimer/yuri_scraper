@@ -1,4 +1,4 @@
-# YuriScraper v0.6 Architecture
+# YuriScraper v0.6.1 Architecture
 
 YuriScraper is a multi-source PC terminal application. The TUI, site-specific
 parsers, download scheduler, converters, and local persistence are separated so
@@ -65,6 +65,19 @@ type BookMetaProvider interface {
 52shuku supplies rich metadata. Yamibo implements cookie authentication and
 maps forum threads/catalog links onto the shared book/chapter representation.
 
+Yamibo additionally implements the optional `ChapterPlanner` protocol. It
+keeps two resolvers separate:
+
+- catalog resolver: extracts independent DOM candidates, scores them, and
+  exposes previews for manual selection;
+- author-post resolver: detects or accepts an author, discovers total pages,
+  scans within a configured limit, and deduplicates ordered posts by PID.
+
+Paging state is persisted as a credential-free JSON checkpoint. Post bodies
+discovered during planning are streamed through a content sink into the normal
+chapter cache, so the worker pool does not fetch them again or retain the
+complete book in memory.
+
 ## TUI state machine
 
 ```mermaid
@@ -83,6 +96,12 @@ stateDiagram-v2
 Search results remain in memory while a book downloads. This is why returning
 from progress restores the author/title result list instead of resetting the
 cursor to the search input.
+
+Search and results are two explicit focus panes backed by the same retained
+state. `navigation.go` owns key routing, `commands.go` owns asynchronous
+Bubble Tea commands, and `model.go` owns state transitions. Wide terminals
+render the panes horizontally; narrow terminals stack them without changing
+focus semantics.
 
 ## Download scheduler
 
@@ -134,9 +153,9 @@ The repository contains source code, not compiled platform binaries.
 
 ## Next integration work
 
-- scan all Yamibo thread pages in author-post mode while preserving post order;
-- add fixture-based Yamibo parser tests for multiple forum layouts;
-- add optional account/password login without persisting the password;
+- add more fixtures when Yamibo exposes materially different historical themes;
+- optionally surface incremental planner progress through Bubble Tea messages;
+- consider account/password login only if it can remain memory-only;
 - expose per-source conservative rate profiles;
 - add a migration note and archive the legacy Python PC implementation after
   the Go path has been verified against representative books.

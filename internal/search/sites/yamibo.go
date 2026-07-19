@@ -14,6 +14,7 @@ import (
 
 	"github.com/Eurekaimer/yuri_scraper/internal/search"
 	"github.com/PuerkitoBio/goquery"
+	"golang.org/x/time/rate"
 )
 
 const yamiboBaseURL = "https://bbs.yamibo.com/"
@@ -31,20 +32,42 @@ var (
 // interface. v0.6 starts with cookie authentication and catalog/elevator
 // threads; author-post extraction falls back to scanning the thread pages.
 type Yamibo struct {
-	client *http.Client
-	mu     sync.RWMutex
-	cookie string
+	baseURL        string
+	client         *http.Client
+	limiter        *rate.Limiter
+	maxConcurrency int64
+	maxRPS         float64
+	mu             sync.RWMutex
+	cookie         string
 }
 
 func NewYamibo() *Yamibo {
-	return &Yamibo{client: &http.Client{Timeout: 20 * time.Second}}
+	return &Yamibo{
+		baseURL:        yamiboBaseURL,
+		client:         &http.Client{Timeout: 20 * time.Second},
+		limiter:        rate.NewLimiter(rate.Limit(1.2), 1),
+		maxConcurrency: 2,
+		maxRPS:         1.2,
+	}
+}
+
+func NewYamiboWithPolicy(maxConcurrency int64, maxRPS float64) *Yamibo {
+	y := NewYamibo()
+	if maxConcurrency > 0 && maxConcurrency <= 2 {
+		y.maxConcurrency = maxConcurrency
+	}
+	if maxRPS > 0 && maxRPS <= 1.2 {
+		y.maxRPS = maxRPS
+		y.limiter.SetLimit(rate.Limit(maxRPS))
+	}
+	return y
 }
 
 func (y *Yamibo) Name() string                  { return "百合会" }
-func (y *Yamibo) BaseURL() string               { return yamiboBaseURL }
+func (y *Yamibo) BaseURL() string               { return y.baseURL }
 func (y *Yamibo) RequiresCookie() bool          { return true }
-func (y *Yamibo) MaxConcurrency() int64         { return 2 }
-func (y *Yamibo) MaxRequestsPerSecond() float64 { return 1.2 }
+func (y *Yamibo) MaxConcurrency() int64         { return y.maxConcurrency }
+func (y *Yamibo) MaxRequestsPerSecond() float64 { return y.maxRPS }
 func (y *Yamibo) HasCookie() bool {
 	y.mu.RLock()
 	defer y.mu.RUnlock()
@@ -57,13 +80,16 @@ func (y *Yamibo) SetCookie(cookie string) {
 }
 
 func (y *Yamibo) document(ctx context.Context, rawURL string) (*goquery.Document, error) {
+	if err := y.limiter.Wait(ctx); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
-	req.Header.Set("Referer", yamiboBaseURL+"forum.php")
+	req.Header.Set("Referer", y.baseURL+"forum.php")
 	y.mu.RLock()
 	cookie := y.cookie
 	y.mu.RUnlock()
@@ -97,7 +123,7 @@ func (y *Yamibo) Search(ctx context.Context, query string) ([]search.SearchResul
 	}
 	seen := make(map[string]search.SearchResult)
 	for _, fid := range []int{55, 49} {
-		searchURL := fmt.Sprintf("%ssearch.php?mod=forum&searchsubmit=yes&srchfid%%5B%%5D=%d&orderby=replies&ascdesc=desc&srchtxt=%s", yamiboBaseURL, fid, url.QueryEscape(query))
+		searchURL := fmt.Sprintf("%ssearch.php?mod=forum&searchsubmit=yes&srchfid%%5B%%5D=%d&orderby=replies&ascdesc=desc&srchtxt=%s", y.baseURL, fid, url.QueryEscape(query))
 		doc, err := y.document(ctx, searchURL)
 		if err != nil {
 			if len(seen) == 0 {
@@ -136,29 +162,8 @@ func (y *Yamibo) Search(ctx context.Context, query string) ([]search.SearchResul
 }
 
 func (y *Yamibo) GetChapterList(ctx context.Context, bookURL string) ([]search.Chapter, error) {
-	doc, err := y.document(ctx, bookURL)
-	if err != nil {
-		return nil, err
-	}
-
-	var best []search.Chapter
-	doc.Find("div.showcollapse_content, div#postlist, div.pcb").Each(func(_ int, scope *goquery.Selection) {
-		items := extractYamiboLinks(scope, y.Name())
-		if scoreYamiboChapters(items) > scoreYamiboChapters(best) {
-			best = items
-		}
-	})
-	if len(best) >= 3 {
-		return renumberChapters(best), nil
-	}
-
-	// Threads without an elevator are treated as books made from substantial
-	// posts by the first-post author.
-	posts := extractYamiboAuthorPosts(doc, bookURL, "")
-	if len(posts) == 0 {
-		return nil, fmt.Errorf("未找到目录或可识别的作者正文楼层")
-	}
-	return renumberChapters(posts), nil
+	plan, err := y.PlanChapters(ctx, bookURL, search.ChapterPlanOptions{})
+	return plan.Chapters, err
 }
 
 func (y *Yamibo) GetChapterContent(ctx context.Context, chapterURL string) (string, error) {
@@ -206,36 +211,6 @@ func extractYamiboLinks(scope *goquery.Selection, siteName string) []search.Chap
 	return items
 }
 
-func extractYamiboAuthorPosts(doc *goquery.Document, threadURL, author string) []search.Chapter {
-	items := make([]search.Chapter, 0)
-	doc.Find("td[id^='postmessage_'], div[id^='postmessage_']").Each(func(_ int, node *goquery.Selection) {
-		id, _ := node.Attr("id")
-		pid := strings.TrimPrefix(id, "postmessage_")
-		text, err := cleanYamiboContent(node)
-		if err != nil || len([]rune(strings.ReplaceAll(text, "\n", ""))) < 80 {
-			return
-		}
-		title := fmt.Sprintf("作者楼层 %d", len(items)+1)
-		for _, line := range strings.Split(text, "\n") {
-			line = strings.TrimSpace(line)
-			if yamiboChapter.MatchString(line) && len([]rune(line)) <= 80 {
-				title = line
-				break
-			}
-		}
-		tid := ""
-		if match := yamiboTID.FindStringSubmatch(threadURL); len(match) > 1 {
-			tid = match[1]
-		}
-		chapterURL := threadURL
-		if tid != "" && pid != "" {
-			chapterURL = fmt.Sprintf("%sforum.php?mod=viewthread&tid=%s&pid=%s", yamiboBaseURL, tid, pid)
-		}
-		items = append(items, search.Chapter{Title: title, URL: chapterURL, SiteName: "百合会"})
-	})
-	return items
-}
-
 func cleanYamiboContent(node *goquery.Selection) (string, error) {
 	clone := node.Clone()
 	clone.Find("script, style, i.pstatus, .pstatus, .quote, .blockquote, .attach_nopermission, .locked, .ignore_js_op, .aimg_tip, .tip").Remove()
@@ -253,16 +228,6 @@ func cleanYamiboContent(node *goquery.Selection) (string, error) {
 		return "", fmt.Errorf("正文过短")
 	}
 	return text, nil
-}
-
-func scoreYamiboChapters(items []search.Chapter) int {
-	score := len(items)
-	for _, item := range items {
-		if yamiboChapter.MatchString(item.Title) {
-			score += 3
-		}
-	}
-	return score
 }
 
 func renumberChapters(items []search.Chapter) []search.Chapter {
@@ -293,12 +258,21 @@ func mapYamiboForum(fid int) string {
 }
 
 func yamiboThreadPage(rawURL string, page int) string {
+	parsed, err := url.Parse(rawURL)
+	if err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		if match := yamiboTID.FindStringSubmatch(rawURL); len(match) > 1 {
+			parsed.Path = "/thread-" + match[1] + "-" + strconv.Itoa(page) + "-1.html"
+			parsed.RawQuery = ""
+			parsed.Fragment = ""
+			return parsed.String()
+		}
+		query := parsed.Query()
+		query.Set("page", strconv.Itoa(page))
+		parsed.RawQuery = query.Encode()
+		return parsed.String()
+	}
 	if match := yamiboTID.FindStringSubmatch(rawURL); len(match) > 1 {
 		return yamiboBaseURL + "thread-" + match[1] + "-" + strconv.Itoa(page) + "-1.html"
 	}
 	return rawURL
 }
-
-// Keep the page regexes exercised and available for the next author-page
-// pagination pass without exposing them as public API.
-var _ = []any{yamiboPage, yamiboPageArg, yamiboThreadPage}

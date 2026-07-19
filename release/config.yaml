@@ -16,3 +16,9 @@ rate_limit: 2.0
 
 # 失败重试次数 / Retry count
 retry_count: 3
+
+yamibo:
+  max_concurrency: 2
+  rate_limit: 1.2
+  max_scan_pages: 10
+  min_post_chars: 80

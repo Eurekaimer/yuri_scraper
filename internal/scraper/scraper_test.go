@@ -1,13 +1,63 @@
 package scraper
 
 import (
+	"context"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Eurekaimer/yuri_scraper/internal/search"
 )
+
+type plannedAdapter struct{ contentRequests int }
+
+func (a *plannedAdapter) Name() string    { return "planned" }
+func (a *plannedAdapter) BaseURL() string { return "https://example.test" }
+func (a *plannedAdapter) Search(context.Context, string) ([]search.SearchResult, error) {
+	return nil, nil
+}
+func (a *plannedAdapter) GetChapterList(context.Context, string) ([]search.Chapter, error) {
+	return nil, nil
+}
+func (a *plannedAdapter) GetChapterContent(context.Context, string) (string, error) {
+	a.contentRequests++
+	return "", nil
+}
+func (a *plannedAdapter) PlanChapters(_ context.Context, _ string, opts search.ChapterPlanOptions) (search.ChapterPlan, error) {
+	chapter := search.Chapter{Index: 1, Title: "第一章", URL: "https://example.test/post?pid=1", SiteName: a.Name()}
+	if err := opts.ContentSink(chapter, "第一章\n这是由规划器直接提供的正文内容，不应再次发起章节请求。"); err != nil {
+		return search.ChapterPlan{}, err
+	}
+	return search.ChapterPlan{Chapters: []search.Chapter{chapter}, Strategy: search.ChapterModeAuthor}, nil
+}
+
+func TestPlannedContentPrimesChapterCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultConfig()
+	cfg.OutputDir, cfg.Format = dir, "txt"
+	engine := NewEngine(cfg)
+	adapter := &plannedAdapter{}
+	meta := search.SearchResult{Title: "checkpoint", BookURL: "https://example.test/thread?tid=1", SiteName: adapter.Name()}
+	progress, err := engine.ScrapeBookWithOptions(context.Background(), adapter, meta.BookURL, meta, search.ChapterPlanOptions{Mode: search.ChapterModeAuthor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range progress {
+	}
+	if adapter.contentRequests != 0 {
+		t.Fatalf("content requests = %d, want 0", adapter.contentRequests)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "checkpoint.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "规划器直接提供") {
+		t.Fatalf("unexpected output: %s", data)
+	}
+}
 
 func TestSpeedHonorsSourceCaps(t *testing.T) {
 	e := NewEngine(DefaultConfig())

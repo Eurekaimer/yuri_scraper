@@ -8,9 +8,7 @@ import (
 )
 
 func TestChapterListAndContent(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test")
-	}
+	requireLiveTest(t)
 
 	s := New52Shuku()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -10,9 +10,7 @@ import (
 )
 
 func TestGetBookMeta_Integration(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	requireLiveTest(t)
 
 	s := New52Shuku()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -80,9 +78,7 @@ func TestGetBookMeta_Integration(t *testing.T) {
 }
 
 func TestGetBookMeta_InvalidURL(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
+	requireLiveTest(t)
 
 	s := New52Shuku()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

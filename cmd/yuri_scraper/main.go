@@ -36,7 +36,7 @@ func main() {
 	// 注册站点适配器
 	registry := search.NewRegistry()
 	registry.Register(sites.New52Shuku())
-	registry.Register(sites.NewYamibo())
+	registry.Register(sites.NewYamiboWithPolicy(int64(cfg.Yamibo.MaxConcurrency), cfg.Yamibo.RateLimit))
 	engine := search.NewEngine(registry)
 
 	scraperEngine := scraper.NewEngine(scraper.Config{
@@ -49,6 +49,10 @@ func main() {
 		SpeedProfile: scraper.SpeedNormal,
 	})
 	m := tui.NewModel(engine, scraperEngine, hist, Version)
+	m.SetChapterPlanDefaults(search.ChapterPlanOptions{
+		MaxScanPages: cfg.Yamibo.MaxScanPages,
+		MinPostChars: cfg.Yamibo.MinPostChars,
+	})
 	p := tea.NewProgram(m, tea.WithAltScreen())
 
 	if _, err := p.Run(); err != nil {

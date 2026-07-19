@@ -9,9 +9,7 @@ import (
 )
 
 func TestSearchLive(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping live search test in short mode")
-	}
+	requireLiveTest(t)
 
 	s := New52Shuku()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -34,9 +32,7 @@ func TestSearchLive(t *testing.T) {
 }
 
 func TestSearchRawResponse(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping raw response test")
-	}
+	requireLiveTest(t)
 
 	s := New52Shuku()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
