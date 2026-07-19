@@ -19,6 +19,9 @@ type SearchResult struct {
 	Tags         []string `json:"tags,omitempty"`
 	WordCount    int      `json:"word_count,omitempty"`
 	LastUpdated  string   `json:"last_updated,omitempty"`
+	Replies      int      `json:"replies,omitempty"`
+	Views        int      `json:"views,omitempty"`
+	Popularity   float64  `json:"popularity,omitempty"`
 }
 
 // Chapter represents a single chapter in a book.
@@ -54,6 +57,19 @@ type CredentialsAuthenticator interface {
 	RequiresAuthentication() bool
 	IsAuthenticated() bool
 	Login(context.Context, string, string) error
+}
+
+// SearchScope identifies a source-defined section that can be searched alone.
+type SearchScope struct {
+	ID   string
+	Name string
+}
+
+// ScopedSearcher lets a source expose searchable sections without leaking
+// site-specific forum IDs into the TUI or search engine.
+type ScopedSearcher interface {
+	SearchScopes() []SearchScope
+	SearchScoped(context.Context, string, []string) ([]SearchResult, error)
 }
 
 // ScrapePolicyProvider lets a sensitive source cap the global speed profiles.

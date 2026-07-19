@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -121,51 +120,6 @@ func (y *Yamibo) document(ctx context.Context, rawURL string) (*goquery.Document
 		return nil, fmt.Errorf("百合会会话已失效，请重新输入账号密码登录")
 	}
 	return doc, nil
-}
-
-func (y *Yamibo) Search(ctx context.Context, query string) ([]search.SearchResult, error) {
-	query = strings.TrimSpace(query)
-	if query == "" {
-		return nil, nil
-	}
-	seen := make(map[string]search.SearchResult)
-	for _, fid := range []int{55, 49} {
-		searchURL := fmt.Sprintf("%ssearch.php?mod=forum&searchsubmit=yes&srchfid%%5B%%5D=%d&orderby=replies&ascdesc=desc&srchtxt=%s", y.baseURL, fid, url.QueryEscape(query))
-		doc, err := y.document(ctx, searchURL)
-		if err != nil {
-			if len(seen) == 0 {
-				return nil, err
-			}
-			continue
-		}
-		doc.Find("a.xst, a.s.xst").Each(func(_ int, a *goquery.Selection) {
-			href, ok := a.Attr("href")
-			if !ok {
-				return
-			}
-			href = normalizeYamiboURL(href)
-			title := strings.TrimSpace(a.Text())
-			if title == "" || href == "" {
-				return
-			}
-			key := href
-			if match := yamiboTID.FindStringSubmatch(href); len(match) > 1 {
-				key = match[1]
-			}
-			seen[key] = search.SearchResult{
-				Title: title, BookURL: href, SiteName: y.Name(), Tags: []string{mapYamiboForum(fid)},
-			}
-		})
-		if len(seen) >= 20 {
-			break
-		}
-	}
-	results := make([]search.SearchResult, 0, len(seen))
-	for _, item := range seen {
-		results = append(results, item)
-	}
-	sort.SliceStable(results, func(i, j int) bool { return results[i].Title < results[j].Title })
-	return results, nil
 }
 
 func (y *Yamibo) GetChapterList(ctx context.Context, bookURL string) ([]search.Chapter, error) {

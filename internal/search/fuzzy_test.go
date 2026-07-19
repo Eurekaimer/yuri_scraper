@@ -1,6 +1,7 @@
 package search
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -81,6 +82,21 @@ func TestFuzzyRank_Empty(t *testing.T) {
 	}
 }
 
+func TestFuzzyRankUsesPopularityAsBoundedTieBreaker(t *testing.T) {
+	results := []SearchResult{
+		{Title: "一周一次 番外", Popularity: 10},
+		{Title: "一周一次 正文", Popularity: 10000},
+		{Title: "完全无关但热门", Popularity: 1e12},
+	}
+	ranked := FuzzyRank("一周一次", results)
+	if ranked[0].Title != "一周一次 正文" {
+		t.Fatalf("hot relevant result should win tie, got %q", ranked[0].Title)
+	}
+	if ranked[len(ranked)-1].Title != "完全无关但热门" {
+		t.Fatalf("popularity overrode relevance: %#v", ranked)
+	}
+}
+
 func TestLevenshtein(t *testing.T) {
 	if d := levenshtein([]rune("abc"), []rune("abc")); d != 0 {
 		t.Errorf("levenshtein(abc,abc) = %d, want 0", d)
@@ -102,5 +118,20 @@ func TestHasCJK(t *testing.T) {
 	}
 	if HasCJK("hello") {
 		t.Error("HasCJK(hello) should be false")
+	}
+}
+
+func BenchmarkFuzzyRank40(b *testing.B) {
+	results := make([]SearchResult, 40)
+	for i := range results {
+		results[i] = SearchResult{
+			Title:      fmt.Sprintf("一周一次 第%d篇", i),
+			Author:     fmt.Sprintf("作者%d", i%7),
+			Popularity: float64((i + 1) * 1234),
+		}
+	}
+	b.ResetTimer()
+	for range b.N {
+		_ = FuzzyRank("一周一次", results)
 	}
 }

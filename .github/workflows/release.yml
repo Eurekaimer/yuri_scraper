@@ -4,24 +4,37 @@ on:
   push:
     tags:
       - "v*"
-    branches:
-      - master
-    paths:
-      - release/VERSION
-      - release/NOTES-*.md
-      - .github/workflows/release.yml
   workflow_dispatch:
     inputs:
       version:
         description: Version embedded in binaries
         required: false
-        default: v0.6.1
+        default: v0.6.2
 
 permissions:
   contents: write
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate release metadata
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          VERSION="$(tr -d '[:space:]' < release/VERSION)"
+          test "${GITHUB_REF_NAME}" = "v${VERSION}"
+          test -f "release/NOTES-v${VERSION}.md"
+      - run: go test -short ./...
+      - run: go vet ./...
+
   build:
+    needs: verify
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -76,7 +89,7 @@ jobs:
           path: dist/*
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/master'
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -88,11 +101,7 @@ jobs:
       - name: Resolve release metadata
         shell: bash
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            TAG="${GITHUB_REF_NAME}"
-          else
-            TAG="v$(tr -d '[:space:]' < release/VERSION)"
-          fi
+          TAG="${GITHUB_REF_NAME}"
           NOTES="release/NOTES-${TAG}.md"
           if [[ ! -f "${NOTES}" ]]; then
             echo "Missing release notes: ${NOTES}"
@@ -101,6 +110,11 @@ jobs:
           echo "RELEASE_TAG=${TAG}" >> "$GITHUB_ENV"
           echo "RELEASE_NAME=YuriScraper ${TAG}" >> "$GITHUB_ENV"
           echo "RELEASE_NOTES=${NOTES}" >> "$GITHUB_ENV"
+      - name: Create checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum yuri-scraper-* > "SHA256SUMS-${RELEASE_TAG}.txt"
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}

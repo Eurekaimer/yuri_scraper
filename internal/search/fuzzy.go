@@ -1,9 +1,21 @@
 package search
 
 import (
+	"math"
+	"sort"
 	"strings"
 	"unicode"
 )
+
+func normalize(s string) string {
+	s = strings.TrimSpace(s)
+	return strings.Map(func(r rune) rune {
+		if unicode.IsPunct(r) || unicode.IsSymbol(r) || unicode.IsSpace(r) {
+			return -1
+		}
+		return unicode.ToLower(r)
+	}, s)
+}
 
 // FuzzyMatch computes a similarity score between query and target text.
 // Score range: 0–100. Higher = more similar.
@@ -161,24 +173,26 @@ func FuzzyRank(query string, results []SearchResult) []SearchResult {
 		r     SearchResult
 		score float64
 	}
+	maxPopularity := 0.0
+	for _, result := range results {
+		maxPopularity = max(maxPopularity, result.Popularity)
+	}
 	items := make([]scored, len(results))
 	for i, r := range results {
-		score := FuzzyMatch(query, r.Title) * 1.0
+		score := FuzzyMatch(query, r.Title)
 		score += FuzzyMatch(query, r.Author) * 0.6
 		if r.Description != "" {
 			score += FuzzyMatch(query, r.Description) * 0.3
 		}
+		// Popularity is a bounded bonus: it breaks similarly relevant matches
+		// without allowing a hot but unrelated thread to outrank an exact title.
+		if maxPopularity > 0 && r.Popularity > 0 {
+			score += 15 * math.Log1p(r.Popularity) / math.Log1p(maxPopularity)
+		}
 		items[i] = scored{r: r, score: score}
 	}
 
-	// Stable sort by score descending
-	for i := 1; i < len(items); i++ {
-		j := i
-		for j > 0 && items[j].score > items[j-1].score {
-			items[j], items[j-1] = items[j-1], items[j]
-			j--
-		}
-	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].score > items[j].score })
 
 	out := make([]SearchResult, len(items))
 	for i, s := range items {

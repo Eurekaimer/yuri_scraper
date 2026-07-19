@@ -23,11 +23,18 @@ type ChapterPlanMsg struct {
 }
 
 func (m *Model) doSearch(query string) tea.Cmd {
-	engine, ctx, site := m.engine, m.ctx, m.selectedSite
+	engine, ctx, site, scopes := m.engine, m.ctx, m.selectedSite, m.activeSearchScopeIDs()
 	return func() tea.Msg {
-		results, err := engine.SearchSite(ctx, site, query)
+		results, err := engine.SearchSiteScoped(ctx, site, query, scopes)
 		return SearchMsg{Results: results, Error: err}
 	}
+}
+
+func (m *Model) activeSearchScopeIDs() []string {
+	if m.scopeCursor <= 0 || m.scopeCursor > len(m.searchScopes) {
+		return nil
+	}
+	return []string{m.searchScopes[m.scopeCursor-1].ID}
 }
 
 func (m *Model) startScrape(result search.SearchResult, options search.ChapterPlanOptions) tea.Cmd {

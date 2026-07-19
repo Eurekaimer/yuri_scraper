@@ -44,6 +44,8 @@ type Model struct {
 	sources                           []search.SiteAdapter
 	sourceCursor                      int
 	selectedSite                      string
+	searchScopes                      []search.SearchScope
+	scopeCursor                       int
 	chapterOptions, activePlanOptions search.ChapterPlanOptions
 	modeCursor, planFocus             int
 	candidates                        []search.ChapterCandidate

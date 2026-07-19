@@ -1,5 +1,5 @@
 [![Go](https://img.shields.io/badge/Go-1.26.5+-00ADD8?logo=go&style=flat)](https://go.dev/)
-[![Version](https://img.shields.io/badge/v0.6.1-7C3AED?style=flat)](https://github.com/Eurekaimer/yuri_scraper/releases)
+[![Version](https://img.shields.io/badge/v0.6.2-7C3AED?style=flat)](https://github.com/Eurekaimer/yuri_scraper/releases)
 [![CI](https://github.com/Eurekaimer/yuri_scraper/actions/workflows/ci.yml/badge.svg)](https://github.com/Eurekaimer/yuri_scraper/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat)](LICENSE)
 
@@ -7,7 +7,7 @@
 
 > 一个本地优先、支持多来源的终端电子书下载器。
 
-YuriScraper 是使用 Go 与 Bubble Tea 编写的键盘流 TUI。v0.6.1 继续稳定
+YuriScraper 是使用 Go 与 Bubble Tea 编写的键盘流 TUI。v0.6.2 继续稳定
 52书库和百合会，并加入断点缓存、失败后部分输出、指数退避，以及可以在
 下载过程中真正改变并发数的有界 worker pool。
 
@@ -25,7 +25,7 @@ YuriScraper 是使用 Go 与 Bubble Tea 编写的键盘流 TUI。v0.6.1 继续�
 写入 YAML、下载历史、解析 checkpoint 或日志。下载前可明确选择自动识别、
 目录/电梯或跨页作者楼层模式。
 
-## v0.6.1 重点改动
+## v0.6.2 重点改动
 
 - 目录候选综合 PID、章节标题、重复链接、论坛控件、折叠节点和顺序评分；
 - TUI 展示候选来源、章节数、评分及前三个标题，并允许手动切换；
@@ -33,6 +33,9 @@ YuriScraper 是使用 Go 与 Bubble Tea 编写的键盘流 TUI。v0.6.1 继续�
 - 按页限速扫描、PID 去重、保持原顺序，并支持扫描 checkpoint 续传；
 - 已在解析阶段取得的楼层正文直接写入章节缓存，不再重复请求；
 - 新增离线 HTML fixture 测试，默认测试不会访问百合会；
+- 百合会搜索同步文学区/译文区、回复数/浏览数双排序和 `kw` 兼容请求；
+- `Ctrl+F` 在全部分区、译文区和文学区之间切换，结果显示回复/浏览热度；
+- 共用搜索层用标题、作者、简介进行中文模糊排序，并以有界热度作为同类结果加权；
 - 修复低并发下未启用 worker 在任务结束后无法退出的问题。
 
 ## v0.6.0 重点改动
@@ -51,19 +54,19 @@ YuriScraper 是使用 Go 与 Bubble Tea 编写的键盘流 TUI。v0.6.1 继续�
 ## 安装
 
 推荐从 [GitHub Releases](https://github.com/Eurekaimer/yuri_scraper/releases)
-下载单文件程序。Windows 使用 `yuri-scraper-v0.6.1-windows-amd64.exe`，不需要
+下载单文件程序。Windows 使用 `yuri-scraper-v0.6.2-windows-amd64.exe`，不需要
 安装 Python、Java 或额外运行时。
 
 本地 Windows 构建请运行 `build.bat`。脚本从 `release/VERSION` 读取版本，
-根目录只生成 `yuri_scraper-v0.6.1.exe`。可用
-`.\yuri_scraper-v0.6.1.exe --version` 在不进入 TUI 的情况下核对版本。
+根目录只生成 `yuri_scraper-v0.6.2.exe`。可用
+`.\yuri_scraper-v0.6.2.exe --version` 在不进入 TUI 的情况下核对版本。
 
 从源码构建：
 
 ```bash
 git clone https://github.com/Eurekaimer/yuri_scraper.git
 cd yuri_scraper
-go build -trimpath -ldflags="-s -w -X main.Version=0.6.1" -o yuri-scraper ./cmd/yuri_scraper/
+go build -trimpath -ldflags="-s -w -X main.Version=0.6.2" -o yuri-scraper ./cmd/yuri_scraper/
 ./yuri-scraper
 ```
 
@@ -73,7 +76,7 @@ go build -trimpath -ldflags="-s -w -X main.Version=0.6.1" -o yuri-scraper ./cmd/
 |---|---|
 | 来源选择 | `1/2`、`j/k`、`Enter` |
 | 百合会认证 | 输入账号密码、`Tab` 切换、`Enter` 登录、`Esc` 返回 |
-| 搜索栏 | 输入关键词、`Enter` 搜索、`Tab` 或 `↓` 进入结果 |
+| 搜索栏 | 输入关键词、`Enter` 搜索、`Ctrl+F` 切换分区、`Tab` 或 `↓` 进入结果 |
 | 结果栏 | `j/k`、`g/G`、`Ctrl+D/U`、`Enter` 下载 |
 | 百合会规划 | `1/2/3` 模式、`Tab` 参数、`h/l` 目录候选、`Enter` 继续 |
 | 搜索栏 ⇄ 作品栏 | `Tab/Shift+Tab`、方向键、`Alt+h/l`；`/` 聚焦搜索栏 |

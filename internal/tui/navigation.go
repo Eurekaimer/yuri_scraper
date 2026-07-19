@@ -167,6 +167,11 @@ func (m *Model) selectSource(cmds *[]tea.Cmd) bool {
 	}
 	adapter := m.sources[m.sourceCursor]
 	m.selectedSite = adapter.Name()
+	m.searchScopes = nil
+	m.scopeCursor = 0
+	if scoped, ok := adapter.(search.ScopedSearcher); ok {
+		m.searchScopes = scoped.SearchScopes()
+	}
 	m.results = nil
 	m.cursor = 0
 	if auth, ok := adapter.(search.CredentialsAuthenticator); ok && auth.RequiresAuthentication() && !auth.IsAuthenticated() {
@@ -180,6 +185,17 @@ func (m *Model) selectSource(cmds *[]tea.Cmd) bool {
 }
 
 func (m *Model) handleSearchKeys(key string, cmds *[]tea.Cmd) bool {
+	if key == "ctrl+f" && len(m.searchScopes) > 0 && !m.searching {
+		m.scopeCursor = (m.scopeCursor + 1) % (len(m.searchScopes) + 1)
+		m.results = nil
+		m.cursor = 0
+		m.searchErr = nil
+		if strings.TrimSpace(m.input.Value()) != "" {
+			m.searching = true
+			*cmds = append(*cmds, m.doSearch(m.input.Value()))
+		}
+		return true
+	}
 	switch key {
 	case "enter":
 		if m.section == SecResults && m.cursor < len(m.results) {

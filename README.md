@@ -1,5 +1,5 @@
 [![Go](https://img.shields.io/badge/Go-1.26.5+-00ADD8?logo=go&style=flat)](https://go.dev/)
-[![Version](https://img.shields.io/badge/v0.6.1-7C3AED?style=flat)](https://github.com/Eurekaimer/yuri_scraper/releases)
+[![Version](https://img.shields.io/badge/v0.6.2-7C3AED?style=flat)](https://github.com/Eurekaimer/yuri_scraper/releases)
 [![CI](https://github.com/Eurekaimer/yuri_scraper/actions/workflows/ci.yml/badge.svg)](https://github.com/Eurekaimer/yuri_scraper/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat)](LICENSE)
 
@@ -8,7 +8,7 @@
 > A local-first, multi-source terminal ebook downloader.
 
 YuriScraper is a keyboard-driven Go TUI for searching, downloading, cleaning,
-and exporting novels as EPUB or TXT. v0.6.1 stabilizes source selection for
+and exporting novels as EPUB or TXT. v0.6.2 stabilizes source selection for
 52shuku and Yamibo, resumable chapter checkpoints, partial output on failure,
 and a bounded worker pool whose concurrency can be changed while downloading.
 
@@ -42,6 +42,8 @@ catalog/elevator, and paginated author-post modes.
 - Ranked Yamibo catalog candidates with manual selection and previews
 - Rate-limited, resumable Yamibo author-post pagination with PID deduplication
 - Fixture-only parser tests; default tests never contact Yamibo
+- Yamibo section search across translation/literature forums with reply/view heat
+- Shared CJK fuzzy ranking with bounded popularity tie-breaking
 
 ## Install
 
@@ -51,14 +53,14 @@ or build from source:
 ```bash
 git clone https://github.com/Eurekaimer/yuri_scraper.git
 cd yuri_scraper
-go build -trimpath -ldflags="-s -w -X main.Version=0.6.1" -o yuri-scraper ./cmd/yuri_scraper/
+go build -trimpath -ldflags="-s -w -X main.Version=0.6.2" -o yuri-scraper ./cmd/yuri_scraper/
 ./yuri-scraper
 ```
 
-Windows users can run the release `yuri-scraper-v0.6.1-windows-amd64.exe` directly.
+Windows users can run the release `yuri-scraper-v0.6.2-windows-amd64.exe` directly.
 Local Windows builds use `build.bat`, which reads `release/VERSION` and creates
-only `yuri_scraper-v0.6.1.exe` in the project root. Verify it without starting
-the TUI with `.\yuri_scraper-v0.6.1.exe --version`.
+only `yuri_scraper-v0.6.2.exe` in the project root. Verify it without starting
+the TUI with `.\yuri_scraper-v0.6.2.exe --version`.
 
 ## Keyboard map
 
@@ -66,7 +68,7 @@ the TUI with `.\yuri_scraper-v0.6.1.exe --version`.
 |---|---|
 | Source | `1/2`, `j/k`, `Enter` |
 | Authentication | account/password, `Tab`, `Enter`, `Esc` |
-| Search input | type, `Enter` search, `Tab` or `↓` results |
+| Search input | type, `Enter` search, `Ctrl+F` section, `Tab` or `↓` results |
 | Results | `j/k`, `g/G`, `Ctrl+D/U`, `Enter` download |
 | Yamibo plan | `1/2/3` mode, `Tab` fields, `h/l` catalog candidate, `Enter` continue |
 | Search ↔ results | `Tab` / `Shift+Tab`, arrows, `Alt+h/l`; `/` focuses search |

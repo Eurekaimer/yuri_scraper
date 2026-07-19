@@ -14,8 +14,8 @@ func TestRepositoryBuildEntrypointsUseReleaseVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	version := strings.TrimSpace(string(versionData))
-	if version != "0.6.1" {
-		t.Fatalf("release/VERSION = %q, want 0.6.1", version)
+	if version != "0.6.2" {
+		t.Fatalf("release/VERSION = %q, want 0.6.2", version)
 	}
 
 	checks := []struct {
@@ -26,7 +26,10 @@ func TestRepositoryBuildEntrypointsUseReleaseVersion(t *testing.T) {
 		{"build.bat", []string{"release\\VERSION", "cmd\\yuri_scraper", "yuri_scraper-v%VERSION%.exe", "del /Q \"yuri_scraper.exe\""}, []string{"cmd\\52scraper", "set VERSION=0.6.0", "copy /Y"}},
 		{"build.sh", []string{"release/VERSION", "yuri-scraper-v${VERSION}"}, []string{"VERSION=\"${1:-0.6.0}"}},
 		{"Makefile", []string{"release/VERSION", "yuri_scraper-v$(VERSION)"}, []string{"VERSION ?= 0.6.0"}},
-		{filepath.Join(".github", "workflows", "release.yml"), []string{"yuri-scraper-v${{ steps.version.outputs.value }}"}, nil},
+		{filepath.Join(".github", "workflows", "release.yml"), []string{
+			"yuri-scraper-v${{ steps.version.outputs.value }}", "go test -short ./...", "go vet ./...",
+			"SHA256SUMS-${RELEASE_TAG}.txt", `test "${GITHUB_REF_NAME}" = "v${VERSION}"`,
+		}, []string{"branches:\n      - master"}},
 	}
 	for _, check := range checks {
 		data, err := os.ReadFile(filepath.Join(root, check.path))

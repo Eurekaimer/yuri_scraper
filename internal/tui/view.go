@@ -158,6 +158,9 @@ func (m *Model) renderSearchWorkspace(w int) string {
 
 	var left strings.Builder
 	left.WriteString(TitleStyle.Render(leftMark + "搜索"))
+	if len(m.searchScopes) > 0 {
+		left.WriteString(MutedStyle.Render("  分区: " + m.activeSearchScopeName()))
+	}
 	left.WriteString("\n\n" + m.input.View() + "\n\n")
 	switch {
 	case m.searching:
@@ -166,10 +169,16 @@ func (m *Model) renderSearchWorkspace(w int) string {
 		left.WriteString(ErrorStyle.Render("⚠ " + m.searchErr.Error()))
 	case len(m.results) > 0:
 		left.WriteString(MutedStyle.Render(fmt.Sprintf("已找到 %d 部作品", len(m.results))))
+	case strings.TrimSpace(m.input.Value()) != "":
+		left.WriteString(MutedStyle.Render("没有找到作品，可按 Ctrl+F 切换分区或缩短关键词"))
 	default:
 		left.WriteString(MutedStyle.Render("输入书名或作者后按 Enter"))
 	}
-	left.WriteString("\n\n" + HelpStyle.Render("Tab / → / l 进入作品栏\n/ 随时回到搜索栏"))
+	help := "Tab / → / l 进入作品栏\n/ 随时回到搜索栏"
+	if len(m.searchScopes) > 0 {
+		help += "\nCtrl+F 切换 全部分区/译文区/文学区"
+	}
+	left.WriteString("\n\n" + HelpStyle.Render(help))
 
 	var right strings.Builder
 	right.WriteString(TitleStyle.Render(fmt.Sprintf("%s作品  %d", rightMark, len(m.results))))
@@ -233,6 +242,9 @@ func (m *Model) renderResultsList(w int) string {
 		}
 		if len(r.Tags) > 0 {
 			line += MutedStyle.Render(" " + r.Tags[0])
+		}
+		if r.Replies > 0 || r.Views > 0 {
+			line += MutedStyle.Render(fmt.Sprintf("  ↩%d  ◉%d", r.Replies, r.Views))
 		}
 		b.WriteString(truncate(line, w))
 		b.WriteString("\n")
@@ -320,8 +332,12 @@ func (m *Model) renderStatusBar() string {
 	case SecAuth:
 		return StatusBarStyle.Render(key("Tab") + " 切换账号/密码  " + key("Enter") + " 登录  " + key("Esc") + " 返回  " + key("Ctrl+C") + " 退出")
 	case SecSearch, SecResults:
+		scopeHelp := ""
+		if len(m.searchScopes) > 0 {
+			scopeHelp = key("Ctrl+F") + " 分区  "
+		}
 		return StatusBarStyle.Render(
-			key("Enter") + " 搜索/下载  " + key("Tab/←/→/Alt+h/l") + " 分栏切换  " + key("/") + " 搜索栏  " +
+			key("Enter") + " 搜索/下载  " + scopeHelp + key("Tab/←/→/Alt+h/l") + " 分栏切换  " + key("/") + " 搜索栏  " +
 				key("Ctrl+S") + " 来源  " + key("Ctrl+L") + " 书库  " + key("Ctrl+C") + " 退出")
 	case SecChapterPlan:
 		return StatusBarStyle.Render(key("1/2/3") + " 模式  " + key("Tab") + " 参数  " + key("h/l") + " 候选  " + key("Enter") + " 继续  " + key("Esc") + " 返回")
@@ -336,6 +352,13 @@ func (m *Model) renderStatusBar() string {
 		return StatusBarStyle.Render(key("Esc") + " 返回  " + key("Ctrl+C") + " 退出")
 	}
 	return ""
+}
+
+func (m *Model) activeSearchScopeName() string {
+	if m.scopeCursor <= 0 || m.scopeCursor > len(m.searchScopes) {
+		return "全部分区"
+	}
+	return m.searchScopes[m.scopeCursor-1].Name
 }
 
 // --- helpers ---

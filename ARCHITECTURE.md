@@ -1,4 +1,4 @@
-# YuriScraper v0.6.1 Architecture
+# YuriScraper v0.6.2 Architecture
 
 YuriScraper is a multi-source PC terminal application. The TUI, site-specific
 parsers, download scheduler, converters, and local persistence are separated so
@@ -58,6 +58,11 @@ type CredentialsAuthenticator interface {
     Login(context.Context, string, string) error
 }
 
+type ScopedSearcher interface {
+    SearchScopes() []SearchScope
+    SearchScoped(context.Context, string, []string) ([]SearchResult, error)
+}
+
 type BookMetaProvider interface {
     GetBookMeta(context.Context, string) (*BookMetaDetail, error)
 }
@@ -66,6 +71,10 @@ type BookMetaProvider interface {
 52shuku supplies rich metadata. Yamibo reads the Discuz login formhash, submits
 the account/password form, retains only the resulting in-memory cookie jar, and
 maps forum threads/catalog links onto the shared book/chapter representation.
+Its search implementation queries literature/translation scopes using both
+reply and view ordering, merges threads by TID, and emits reply/view popularity
+signals. The shared search package owns query variants, CJK fuzzy relevance,
+and bounded popularity weighting, so site adapters do not duplicate ranking.
 
 Yamibo additionally implements the optional `ChapterPlanner` protocol. It
 keeps two resolvers separate:
@@ -161,7 +170,8 @@ The repository contains source code, not compiled platform binaries.
 
 - add more fixtures when Yamibo exposes materially different historical themes;
 - optionally surface incremental planner progress through Bubble Tea messages;
-- consider account/password login only if it can remain memory-only;
+- verify account login and scoped search against representative live threads
+  without persisting credentials;
 - expose per-source conservative rate profiles;
 - add a migration note and archive the legacy Python PC implementation after
   the Go path has been verified against representative books.

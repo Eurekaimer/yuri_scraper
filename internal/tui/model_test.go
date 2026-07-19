@@ -36,6 +36,19 @@ type credentialsAdapter struct {
 	loggedIn bool
 }
 
+type scopedNavigationAdapter struct {
+	navigationAdapter
+	requested []string
+}
+
+func (a *scopedNavigationAdapter) SearchScopes() []search.SearchScope {
+	return []search.SearchScope{{ID: "55", Name: "译文区"}, {ID: "49", Name: "文学区"}}
+}
+func (a *scopedNavigationAdapter) SearchScoped(_ context.Context, _ string, scopes []string) ([]search.SearchResult, error) {
+	a.requested = append([]string(nil), scopes...)
+	return []search.SearchResult{{Title: "一周一次", SiteName: a.name}}, nil
+}
+
 func (a *credentialsAdapter) RequiresAuthentication() bool { return true }
 func (a *credentialsAdapter) IsAuthenticated() bool        { return a.loggedIn }
 func (a *credentialsAdapter) Login(_ context.Context, username, password string) error {
@@ -203,5 +216,39 @@ func TestLeavingAuthClearsPassword(t *testing.T) {
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc}, &cmds)
 	if m.section != SecSources || m.auth.password.Value() != "" {
 		t.Fatalf("password survived auth exit: section=%v password=%q", m.section, m.auth.password.Value())
+	}
+}
+
+func TestYamiboScopeCycleAutomaticallyResearches(t *testing.T) {
+	registry := search.NewRegistry()
+	adapter := &scopedNavigationAdapter{navigationAdapter: navigationAdapter{name: "百合会"}}
+	registry.Register(adapter)
+	history, err := store.LoadHistory(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewModel(search.NewEngine(registry), scraper.NewEngine(scraper.DefaultConfig()), history, "test")
+	var cmds []tea.Cmd
+	m.selectSource(&cmds)
+	m.input.SetValue("一周一次")
+	cmds = nil
+	m.handleSearchKeys("ctrl+f", &cmds)
+	if m.scopeCursor != 1 || !m.searching || len(cmds) != 1 || m.activeSearchScopeName() != "译文区" {
+		t.Fatalf("scope search not started: cursor=%d searching=%v cmds=%d", m.scopeCursor, m.searching, len(cmds))
+	}
+	msg := cmds[0]()
+	_, _ = m.Update(msg)
+	if len(adapter.requested) != 1 || adapter.requested[0] != "55" || len(m.results) != 1 {
+		t.Fatalf("wrong scoped request: scopes=%#v results=%#v", adapter.requested, m.results)
+	}
+}
+
+func TestSearchWorkspaceShowsEmptyResultFeedback(t *testing.T) {
+	m := newNavigationModel(t)
+	m.section = SecSearch
+	m.input.SetValue("一周一次")
+	view := m.renderSearchWorkspace(100)
+	if !strings.Contains(view, "没有找到作品") {
+		t.Fatalf("empty result feedback missing: %q", view)
 	}
 }
