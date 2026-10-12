@@ -3,14 +3,15 @@ package scraper
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Eurekaimer/yuri_scraper/internal/search"
+	"github.com/Eurekaimer/yuri_scraper/internal/transport"
 )
 
 type chapterJob struct {
@@ -24,27 +25,33 @@ type chapterResult struct {
 	err    error
 }
 
-func (e *Engine) run(ctx context.Context, adapter search.SiteAdapter, meta search.SearchResult, chapters []search.Chapter, cacheDir string, progress chan<- Progress) {
-	defer close(progress)
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-		progress <- Progress{ChapterIndex: -1, TotalChapters: len(chapters), Error: fmt.Errorf("create checkpoint directory: %w", err)}
+// Only the coordinator publishes; dropping an old intermediate event leaves a
+// bounded mailbox with the most recent counts, including the final result.
+func publishProgress(progress chan Progress, event Progress) {
+	select {
+	case progress <- event:
 		return
+	default:
 	}
-	jobs, feedingDone := make(chan chapterJob), make(chan struct{})
-	results := make(chan chapterResult, min(len(chapters), 256))
-	maxWorkers := max64(16, e.cfg.Concurrency)
-	if maxWorkers > 64 {
-		maxWorkers = 64
+	select {
+	case <-progress:
+	default:
 	}
-	var wg sync.WaitGroup
-	for workerID := int64(0); workerID < maxWorkers; workerID++ {
-		wg.Add(1)
-		go func(id int64) {
-			defer wg.Done()
+	progress <- event
+}
+
+func (e *Engine) run(ctx context.Context, adapter search.SiteAdapter, meta search.SearchResult, chapters []search.Chapter, cacheDir string, workerCount int, progress chan Progress) {
+	defer func() { e.running.Store(false); close(progress) }()
+	state := Progress{ChapterIndex: -1, TotalChapters: len(chapters), Phase: "downloading"}
+	publishProgress(progress, state)
+	jobs := make(chan chapterJob, workerCount)
+	results := make(chan chapterResult, workerCount)
+	var workers sync.WaitGroup
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
 			for {
-				if err := e.waitUntilEnabled(ctx, id, feedingDone); err != nil {
-					return
-				}
 				select {
 				case <-ctx.Done():
 					return
@@ -52,13 +59,22 @@ func (e *Engine) run(ctx context.Context, adapter search.SiteAdapter, meta searc
 					if !ok {
 						return
 					}
-					results <- e.fetchChapter(ctx, adapter, cacheDir, job)
+					if err := e.acquireWorker(ctx); err != nil {
+						return
+					}
+					result := e.fetchChapter(ctx, adapter, cacheDir, job)
+					e.releaseWorker()
+					select {
+					case results <- result:
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
-		}(workerID)
+		}()
 	}
 	go func() {
-		defer func() { close(jobs); close(feedingDone) }()
+		defer close(jobs)
 		for i, chapter := range chapters {
 			select {
 			case <-ctx.Done():
@@ -67,103 +83,135 @@ func (e *Engine) run(ctx context.Context, adapter search.SiteAdapter, meta searc
 			}
 		}
 	}()
-	go func() { wg.Wait(); close(results) }()
-	paths := make(map[int]string, len(chapters))
+	go func() { workers.Wait(); close(results) }()
+	paths := make([]string, len(chapters))
 	failed := make([]FailedChapter, 0)
 	for result := range results {
 		chapter := chapters[result.index]
+		event := state
+		event.ChapterIndex, event.ChapterTitle, event.ChapterURL = result.index, chapter.Title, chapter.URL
+		event.Error, event.Done, event.Cached = result.err, result.err == nil, result.cached
 		if result.err != nil {
 			failed = append(failed, FailedChapter{Index: result.index, Title: chapter.Title, URL: chapter.URL, Error: result.err.Error()})
-			progress <- Progress{ChapterIndex: result.index, ChapterTitle: chapter.Title, ChapterURL: chapter.URL, TotalChapters: len(chapters), Error: result.err}
-			continue
+			state.Failed++
+		} else {
+			paths[result.index] = result.path
+			state.Completed++
+			if result.cached {
+				state.CachedCount++
+			}
 		}
-		paths[result.index] = result.path
-		progress <- Progress{ChapterIndex: result.index, ChapterTitle: chapter.Title, TotalChapters: len(chapters), Done: true, Cached: result.cached}
+		event.Completed, event.Failed, event.CachedCount = state.Completed, state.Failed, state.CachedCount
+		publishProgress(progress, event)
 	}
 	if err := ctx.Err(); err != nil {
-		progress <- Progress{ChapterIndex: -1, TotalChapters: len(chapters), Error: err}
+		state.Phase, state.Error = "canceled", err
+		publishProgress(progress, state)
 		return
 	}
-	outputFile, err := e.writeOutput(ctx, adapter, meta, chapters, paths, failed)
-	if err != nil {
-		progress <- Progress{ChapterIndex: -1, TotalChapters: len(chapters), Error: fmt.Errorf("write output: %w", err)}
-		return
-	}
-	failedFile := ""
+	sort.Slice(failed, func(i, j int) bool { return failed[i].Index < failed[j].Index })
+	manifestPath := filepath.Join(e.cfg.OutputDir, bookOutputStem(meta)+".failed.json")
 	if len(failed) > 0 {
-		failedFile, err = SaveFailedChapters(e.cfg.OutputDir, meta.Title, failed)
+		var err error
+		state.FailedFile, err = saveFailedChapters(manifestPath, failed)
 		if err != nil {
-			progress <- Progress{ChapterIndex: -1, TotalChapters: len(chapters), OutputFile: outputFile, Error: fmt.Errorf("save failed chapters: %w", err)}
+			state.Phase, state.Error = "failed", fmt.Errorf("save failed chapters: %w", err)
+			publishProgress(progress, state)
 			return
 		}
-	} else {
-		_ = os.RemoveAll(cacheDir)
-		_ = os.Remove(filepath.Join(e.cfg.OutputDir, safeFilename(meta.Title)+".failed.json"))
 	}
-	progress <- Progress{ChapterIndex: -1, TotalChapters: len(chapters), OutputFile: outputFile, FailedFile: failedFile}
-}
-
-func (e *Engine) waitUntilEnabled(ctx context.Context, workerID int64, feedingDone <-chan struct{}) error {
-	for workerID >= e.concurrency.Load() {
-		timer := time.NewTimer(50 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-feedingDone:
-			timer.Stop()
-			return context.Canceled
-		case <-timer.C:
+	if state.Completed == 0 {
+		state.Phase, state.Error = "failed", fmt.Errorf("all %d chapter pages failed", len(chapters))
+		publishProgress(progress, state)
+		return
+	}
+	state.Phase = "exporting"
+	publishProgress(progress, state)
+	outputFile, err := e.writeOutput(ctx, adapter, meta, chapters, paths, failed)
+	if err != nil {
+		state.Phase = "failed"
+		if ctx.Err() != nil {
+			state.Phase = "canceled"
+		}
+		state.Error = fmt.Errorf("write output: %w", err)
+		publishProgress(progress, state)
+		return
+	}
+	state.OutputFile, state.Phase = outputFile, "completed"
+	if len(failed) > 0 {
+		state.Phase = "partial"
+	} else {
+		if err := os.RemoveAll(cacheDir); err != nil {
+			state.Phase, state.Error = "failed", fmt.Errorf("remove completed checkpoint cache: %w", err)
+		}
+		if err := os.Remove(manifestPath); err != nil && !os.IsNotExist(err) {
+			state.Phase, state.Error = "failed", fmt.Errorf("remove obsolete failure manifest: %w", err)
 		}
 	}
-	return nil
+	publishProgress(progress, state)
 }
 
 func (e *Engine) fetchChapter(ctx context.Context, adapter search.SiteAdapter, cacheDir string, job chapterJob) chapterResult {
+	if err := ctx.Err(); err != nil {
+		return chapterResult{index: job.index, err: err}
+	}
 	path := filepath.Join(cacheDir, shortHash(job.chapter.URL)+".txt")
-	if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+	if cached, err := validCheckpoint(path); err != nil {
+		return chapterResult{index: job.index, err: err}
+	} else if cached {
 		return chapterResult{index: job.index, path: path, cached: true}
+	}
+	if auth, ok := adapter.(search.CredentialsAuthenticator); ok && auth.RequiresAuthentication() && !auth.IsAuthenticated() {
+		return chapterResult{index: job.index, err: &transport.PermanentError{Err: fmt.Errorf("source authentication is required")}}
 	}
 	var content string
 	var lastErr error
-	for attempt := 0; attempt <= e.cfg.RetryCount; attempt++ {
+	for attempt := range e.cfg.RetryCount + 1 {
 		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return chapterResult{index: job.index, err: ctx.Err()}
-			case <-time.After(retryDelay(e.cfg.RetryDelay, attempt, job.index)):
+			delay := max(retryDelay(e.cfg.RetryDelay, attempt), transport.RetryAfter(lastErr))
+			if err := waitContext(ctx, delay); err != nil {
+				return chapterResult{index: job.index, err: err}
 			}
 		}
 		if err := e.limiter.Wait(ctx); err != nil {
 			return chapterResult{index: job.index, err: err}
 		}
 		content, lastErr = adapter.GetChapterContent(ctx, job.chapter.URL)
-		if lastErr == nil && strings.TrimSpace(content) != "" {
-			break
+		if err := ctx.Err(); err != nil {
+			return chapterResult{index: job.index, err: err}
+		}
+		if lastErr == nil && strings.TrimSpace(content) == "" {
+			lastErr = &transport.PermanentError{Err: fmt.Errorf("empty chapter content")}
 		}
 		if lastErr == nil {
-			lastErr = fmt.Errorf("empty chapter content")
+			break
 		}
-		log.Printf("[retry] chapter %d attempt %d: %v", job.index+1, attempt+1, lastErr)
+		if !transport.CanRetry(lastErr) {
+			break
+		}
 	}
 	if lastErr != nil {
 		return chapterResult{index: job.index, err: lastErr}
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
-		return chapterResult{index: job.index, err: err}
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	if err := writeChapterCheckpoint(cacheDir, job.chapter.URL, content); err != nil {
 		return chapterResult{index: job.index, err: err}
 	}
 	return chapterResult{index: job.index, path: path}
 }
 
-func retryDelay(base time.Duration, attempt, index int) time.Duration {
-	delay := base << min(attempt-1, 4)
-	if delay > 30*time.Second {
-		delay = 30 * time.Second
+func waitContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
-	return delay + time.Duration((index+attempt*17)%750)*time.Millisecond
+}
+
+func retryDelay(base time.Duration, attempt int) time.Duration {
+	base = min(base, 30*time.Second)
+	delay := base << min(max(attempt-1, 0), 4)
+	return min(delay, 30*time.Second)
 }

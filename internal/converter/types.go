@@ -7,6 +7,10 @@ type Chapter struct {
 	Content string
 }
 
+// ChapterSource yields chapters in reading order and stops when the writer
+// returns an error. Producers need retain only the current page or chapter.
+type ChapterSource func(yield func(Chapter) error) error
+
 type BookMeta struct {
 	Title       string
 	Author      string
@@ -14,5 +18,4 @@ type BookMeta struct {
 	Protagonist string   // main character(s)
 	Tags        []string // genre / category tags
 	Language    string   // "zh-CN" etc, default "zh-CN"
-	Chapters    []Chapter
 }

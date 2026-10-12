@@ -6,49 +6,27 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Eurekaimer/yuri_scraper/internal/converter"
 	"github.com/Eurekaimer/yuri_scraper/internal/search"
 )
 
-func (e *Engine) writeOutput(ctx context.Context, adapter search.SiteAdapter, meta search.SearchResult, chapters []search.Chapter, paths map[int]string, failed []FailedChapter) (string, error) {
-	if err := os.MkdirAll(e.cfg.OutputDir, 0o755); err != nil {
-		return "", fmt.Errorf("create output dir: %w", err)
-	}
-	var rawText strings.Builder
+func (e *Engine) writeOutput(ctx context.Context, adapter search.SiteAdapter, meta search.SearchResult, chapters []search.Chapter, paths []string, failed []FailedChapter) (string, error) {
 	failedByIndex := make(map[int]FailedChapter, len(failed))
 	for _, item := range failed {
 		failedByIndex[item.Index] = item
 	}
-	for i, chapter := range chapters {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		if path := paths[i]; path != "" {
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return "", err
-			}
-			rawText.Write(data)
-			rawText.WriteByte('\n')
-			continue
-		}
-		if item, ok := failedByIndex[i]; ok {
-			fmt.Fprintf(&rawText, "\n第%d章 %s\n【下载失败：%s】\n", i+1, chapter.Title, item.Error)
-		}
-	}
-	ordered := converter.SplitChapters(rawText.String(), 1)
-	if len(ordered) == 0 {
-		return "", fmt.Errorf("no content to write")
-	}
 	description, protagonist, tags := meta.Description, meta.Protagonist, meta.Tags
 	if provider, ok := adapter.(search.BookMetaProvider); ok {
-		if detail, err := provider.GetBookMeta(ctx, meta.BookURL); err == nil && detail != nil {
+		detail, _ := provider.GetBookMeta(ctx, meta.BookURL)
+		if detail != nil {
 			if detail.Description != "" {
 				description = detail.Description
 			}
@@ -56,110 +34,192 @@ func (e *Engine) writeOutput(ctx context.Context, adapter search.SiteAdapter, me
 				protagonist = detail.Protagonist
 			}
 			if len(detail.Tags) > 0 {
-				tags = converter.MergeTags(tags, detail.Tags)
+				tags = detail.Tags
 			}
 		}
 	}
-	bookMeta := converter.BookMeta{Title: meta.Title, Author: orDefault(meta.Author, "Unknown"), Description: description, Protagonist: protagonist, Tags: tags, Language: "zh-CN", Chapters: ordered}
-	ext := ".txt"
-	if e.cfg.Format == "epub" {
-		ext = ".epub"
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
-	outFile := filepath.Join(e.cfg.OutputDir, safeFilename(meta.Title)+ext)
-	tmpFile := outFile + ".tmp"
-	f, err := os.Create(tmpFile)
+	bookMeta := converter.BookMeta{Title: meta.Title, Author: orDefault(meta.Author, "Unknown"), Description: description, Protagonist: protagonist, Tags: tags, Language: "zh-CN"}
+	// Page bodies are read only when the previous page's actual chapters have
+	// been written. Navigation retains titles, never the complete book text.
+	source := converter.ChapterSource(func(yield func(converter.Chapter) error) error {
+		index := 1
+		for i, page := range chapters {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if failure, missing := failedByIndex[i]; missing {
+				chapter := converter.Chapter{Index: index, Title: orDefault(page.Title, fmt.Sprintf("Page %d", i+1)), Content: fmt.Sprintf("[Download failed: %s]\nSource: %s", failure.Error, failure.URL)}
+				if err := yield(chapter); err != nil {
+					return err
+				}
+				index++
+				continue
+			}
+			data, err := os.ReadFile(paths[i])
+			if err != nil {
+				return fmt.Errorf("read chapter checkpoint: %w", err)
+			}
+			actual := converter.SplitChapters(string(data), index)
+			for _, chapter := range actual {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if chapter.Title == "" {
+					chapter.Title = orDefault(page.Title, fmt.Sprintf("Page %d", i+1))
+				}
+				if err := yield(chapter); err != nil {
+					return err
+				}
+				index++
+			}
+		}
+		return nil
+	})
+	outFile := filepath.Join(e.cfg.OutputDir, bookOutputStem(meta)+"."+e.cfg.Format)
+	tmp, err := os.CreateTemp(e.cfg.OutputDir, ".yuri-export-*")
 	if err != nil {
 		return "", err
 	}
-	if ext == ".epub" {
-		err = converter.WriteEPUB(f, bookMeta)
+	defer os.Remove(tmp.Name())
+	writer := contextWriter{context: ctx, writer: tmp}
+	if e.cfg.Format == "epub" {
+		err = converter.WriteEPUBStream(writer, bookMeta, source)
 	} else {
-		err = converter.WriteTXT(f, ordered)
+		err = converter.WriteTXTStream(writer, source)
 	}
-	closeErr := f.Close()
+	if err == nil {
+		err = tmp.Sync()
+	}
+	closeErr := tmp.Close()
 	if err == nil {
 		err = closeErr
 	}
 	if err != nil {
-		_ = os.Remove(tmpFile)
 		return "", err
 	}
-	if err := os.Rename(tmpFile, outFile); err != nil {
-		_ = os.Remove(tmpFile)
+	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	log.Printf("Saved: %s (%d chapters)", outFile, len(ordered))
+	if err := os.Rename(tmp.Name(), outFile); err != nil {
+		return "", err
+	}
 	return outFile, nil
 }
 
-func SaveFailedChapters(outputDir, bookTitle string, failed []FailedChapter) (string, error) {
+type contextWriter struct {
+	context context.Context
+	writer  io.Writer
+}
+
+func (w contextWriter) Write(p []byte) (int, error) {
+	if err := w.context.Err(); err != nil {
+		return 0, err
+	}
+	return w.writer.Write(p)
+}
+
+func saveFailedChapters(path string, failed []FailedChapter) (string, error) {
 	if len(failed) == 0 {
 		return "", nil
 	}
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		return "", err
-	}
-	path := filepath.Join(outputDir, safeFilename(bookTitle)+".failed.json")
 	data, err := json.MarshalIndent(failed, "", "  ")
 	if err != nil {
 		return "", err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+	if err := atomicPrivateWrite(path, string(data)); err != nil {
 		return "", err
 	}
 	return path, nil
 }
 
+func bookOutputStem(meta search.SearchResult) string {
+	return safeFilename(meta.Title) + "-" + shortHash(bookCacheKey(meta.SiteName, meta.BookURL))
+}
+
 func safeFilename(s string) string {
-	repl := map[rune]rune{'/': '_', '\\': '_', ':': '_', '*': '_', '?': '_', '"': '_', '<': '_', '>': '_', '|': '_'}
 	cleaned := strings.Map(func(r rune) rune {
-		if v, ok := repl[r]; ok {
-			return v
+		if unicode.IsControl(r) || strings.ContainsRune("/\\:*?\"<>|", r) {
+			return '_'
 		}
 		return r
 	}, s)
 	cleaned = strings.Trim(cleaned, " .")
+	// Leave room for the identity suffix and manifest extension on common filesystems.
+	for len(cleaned) > 180 {
+		_, size := utf8.DecodeLastRuneInString(cleaned)
+		cleaned = cleaned[:len(cleaned)-size]
+	}
 	if cleaned == "" {
 		return "book"
 	}
 	return cleaned
 }
+
 func shortHash(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:8])
 }
+
+func validCheckpoint(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("checkpoint is not a regular file: %s", path)
+	}
+	if info.Size() == 0 {
+		return false, nil
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func writeChapterCheckpoint(cacheDir, chapterURL, content string) error {
 	path := filepath.Join(cacheDir, shortHash(chapterURL)+".txt")
-	if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+	if cached, err := validCheckpoint(path); err != nil {
+		return err
+	} else if cached {
 		return nil
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(content), 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return atomicPrivateWrite(path, content)
 }
+
+func atomicPrivateWrite(path, content string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".yuri-checkpoint-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	_, err = io.WriteString(tmp, content)
+	if err == nil {
+		err = tmp.Sync()
+	}
+	closeErr := tmp.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
 func bookCacheKey(sourceName, rawURL string) string {
 	if parsed, err := url.Parse(strings.TrimSpace(rawURL)); err == nil {
 		parsed.Fragment = ""
+		parsed.RawQuery = parsed.Query().Encode()
 		rawURL = parsed.String()
 	}
 	return sourceName + "\n" + rawURL
-}
-func max64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }
 func orDefault(s, fallback string) string {
 	if s == "" {

@@ -2,8 +2,10 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -17,11 +19,14 @@ type HistoryEntry struct {
 	FilePath   string    `json:"file_path"`
 	Chapters   int       `json:"chapters"`
 	Downloaded time.Time `json:"downloaded"`
+	State      string    `json:"state,omitempty"`
+	FailedFile string    `json:"failed_file,omitempty"`
 }
 
 // History manages download history.
 type History struct {
 	path    string
+	mu      sync.Mutex
 	Entries []HistoryEntry `json:"entries"`
 }
 
@@ -41,7 +46,7 @@ func LoadHistory(outputDir string) (*History, error) {
 	}
 
 	if err := json.Unmarshal(data, &h.Entries); err != nil {
-		return h, nil // corrupt history → start fresh
+		return nil, fmt.Errorf("read history %s: %w (original file preserved)", h.path, err)
 	}
 
 	return h, nil
@@ -49,29 +54,23 @@ func LoadHistory(outputDir string) (*History, error) {
 
 // Add records a new download.
 func (h *History) Add(entry HistoryEntry) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	entry.Downloaded = time.Now()
-	for i := range h.Entries {
-		if h.Entries[i].BookURL == entry.BookURL {
-			h.Entries[i] = entry
-			return h.save()
+	entries := append([]HistoryEntry(nil), h.Entries...)
+	for i := range entries {
+		if entry.BookURL != "" && entries[i].BookURL == entry.BookURL && entries[i].SiteName == entry.SiteName && entries[i].Format == entry.Format {
+			entries[i] = entry
+			return h.commit(entries)
 		}
 	}
-	h.Entries = append(h.Entries, entry)
-	return h.save()
-}
-
-// Exists checks if a book URL has been downloaded.
-func (h *History) Exists(bookURL string) bool {
-	for _, e := range h.Entries {
-		if e.BookURL == bookURL {
-			return true
-		}
-	}
-	return false
+	return h.commit(append(entries, entry))
 }
 
 // List returns all entries, newest first.
 func (h *History) List() []HistoryEntry {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	result := make([]HistoryEntry, len(h.Entries))
 	for i, e := range h.Entries {
 		result[len(h.Entries)-1-i] = e
@@ -79,18 +78,48 @@ func (h *History) List() []HistoryEntry {
 	return result
 }
 
-func (h *History) save() error {
-	data, err := json.MarshalIndent(h.Entries, "", "  ")
+// RemovePath forgets metadata only; it never removes a downloaded file.
+func (h *History) RemovePath(path string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	resolve := func(p string) string {
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(filepath.Dir(h.path), p)
+		}
+		return filepath.Clean(p)
+	}
+	entries := make([]HistoryEntry, 0, len(h.Entries))
+	for _, entry := range h.Entries {
+		if resolve(entry.FilePath) != resolve(path) {
+			entries = append(entries, entry)
+		}
+	}
+	return h.commit(entries)
+}
+
+func (h *History) commit(entries []HistoryEntry) error {
+	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := h.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(h.path), ".history-*.tmp")
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, h.path); err != nil {
-		_ = os.Remove(tmp)
+	defer os.Remove(f.Name())
+	if _, err = f.Write(data); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
 		return err
 	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := os.Rename(f.Name(), h.path); err != nil {
+		return err
+	}
+	h.Entries = entries
 	return nil
 }

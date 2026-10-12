@@ -7,36 +7,26 @@ import (
 
 var reChapterHead = regexp.MustCompile(`(?m)^第[\d零一二三四五六七八九十百千]+章[^\n]*`)
 
-// SplitChapters scans text for "第N章" markers and returns structured chapters.
-// If fewer than 3 chapter markers are found, returns the original text as one chapter.
+// SplitChapters preserves every real chapter marker within a fetched page,
+// including pages with only one or two chapters and text before the first marker.
 func SplitChapters(rawText string, baseIndex int) []Chapter {
-	// Find all chapter marker positions
 	locs := reChapterHead.FindAllStringIndex(rawText, -1)
-	if len(locs) < 3 {
-		// Not enough markers — treat as one page
-		return []Chapter{{
-			Index:   baseIndex,
-			Title:   "",
-			Content: rawText,
-		}}
+	if len(locs) == 0 {
+		return []Chapter{{Index: baseIndex, Content: rawText}}
 	}
-
-	var chapters []Chapter
+	chapters := make([]Chapter, 0, len(locs)+1)
+	if prefix := strings.TrimSpace(rawText[:locs[0][0]]); prefix != "" {
+		chapters = append(chapters, Chapter{Index: baseIndex, Content: prefix})
+	}
 	for i, loc := range locs {
-		start := loc[0]
-		var end int
+		end := len(rawText)
 		if i+1 < len(locs) {
 			end = locs[i+1][0]
-		} else {
-			end = len(rawText)
 		}
-		title := strings.TrimSpace(rawText[loc[0]:loc[1]])
-		content := strings.TrimSpace(rawText[start:end])
-
 		chapters = append(chapters, Chapter{
-			Index:   baseIndex + i,
-			Title:   title,
-			Content: content,
+			Index:   baseIndex + len(chapters),
+			Title:   strings.TrimSpace(rawText[loc[0]:loc[1]]),
+			Content: strings.TrimSpace(rawText[loc[1]:end]),
 		})
 	}
 	return chapters

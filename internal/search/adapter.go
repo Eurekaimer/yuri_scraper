@@ -15,7 +15,7 @@ type SearchResult struct {
 	ChapterCount int      `json:"chapter_count,omitempty"`
 	Description  string   `json:"description,omitempty"`
 	Protagonist  string   `json:"protagonist,omitempty"`
-	Status       string   `json:"status,omitempty"` // "连载中" or "已完结"
+	Status       string   `json:"status,omitempty"` // "连载中", "完结", or "已完结"
 	Tags         []string `json:"tags,omitempty"`
 	WordCount    int      `json:"word_count,omitempty"`
 	LastUpdated  string   `json:"last_updated,omitempty"`

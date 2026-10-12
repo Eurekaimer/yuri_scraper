@@ -1,21 +1,26 @@
 # YuriScraper Configuration
-# 修改后重启程序即可生效
-# Restart after editing
+# Relative output_dir resolves against this file's directory.
+# Restart the program after editing.
 
-# 下载目录 / Download directory
+# Download directory / 下载目录
 output_dir: novels
 
-# 输出格式 / Format: txt or epub
+# Format: txt or epub / 输出格式
 format: epub
 
-# 并发下载数 / Concurrent workers (0 = use speed profile default)
+# Concurrent workers / 并发下载数
 concurrency: 8
 
-# 每秒请求数限制 (每个站点) / Rate limit per site (0 = use profile default)
+# Requests per second per site / 每秒请求数
 rate_limit: 2.0
 
-# 失败重试次数 / Retry count
+# Retry count / 失败重试次数
 retry_count: 3
+
+startup:
+  # sweep, static, or off / 启动动画
+  animation: sweep
+  reduced_motion: false
 
 yamibo:
   max_concurrency: 2

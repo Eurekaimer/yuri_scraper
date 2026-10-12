@@ -1,6 +1,6 @@
-# 52Scraper
+# YuriScraper
 
-# Downloaded novels
+# Downloaded library and generated metadata
 novels/
 
 # IDE / Editor
@@ -20,12 +20,6 @@ novels/
 *.out
 vendor/
 
-# Python (legacy)
-__pycache__/
-*.py[oc]
-.venv/
-*.egg-info/
-
 # OS
 .DS_Store
 Thumbs.db
@@ -40,3 +34,7 @@ bin/
 .env
 .env.local
 yamibo_config.json
+
+# Local research report
+/RESEARCH_REPORT.md
+/STARTUP_PREVIEW.html

@@ -2,17 +2,16 @@ package tui
 
 import (
 	"context"
-	"fmt"
-	"path/filepath"
+	"errors"
+	"os"
 	"strconv"
-	"strings"
+	"time"
 
-	"github.com/Eurekaimer/yuri_scraper/internal/scraper"
+	"github.com/Eurekaimer/yuri_scraper/internal/app"
+	"github.com/Eurekaimer/yuri_scraper/internal/library"
 	"github.com/Eurekaimer/yuri_scraper/internal/search"
-	"github.com/Eurekaimer/yuri_scraper/internal/store"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
 type Section int
@@ -25,79 +24,94 @@ const (
 	SecChapterPlan
 	SecProgress
 	SecLibrary
+	SecStartup
 )
 
 type Model struct {
-	section       Section
-	returnSection Section
-	width, height int
-	ready         bool
-
-	input                             textinput.Model
-	auth                              authForm
-	authorInput, maxPagesInput        textinput.Model
-	minCharsInput                     textinput.Model
-	results                           []search.SearchResult
-	searching                         bool
-	searchErr                         error
-	cursor                            int
-	sources                           []search.SiteAdapter
-	sourceCursor                      int
-	selectedSite                      string
-	searchScopes                      []search.SearchScope
-	scopeCursor                       int
-	chapterOptions, activePlanOptions search.ChapterPlanOptions
-	modeCursor, planFocus             int
-	candidates                        []search.ChapterCandidate
-	candidateCursor                   int
-	inspectingPlan                    bool
-	planErr                           error
-
-	progress   ProgressState
-	progressCh <-chan scraper.Progress
-	activeBook search.SearchResult
-	entries    []store.HistoryEntry
-	libCursor  int
-
-	engine  *search.Engine
-	scraper *scraper.Engine
-	history *store.History
-	ctx     context.Context
-	cancel  context.CancelFunc
-	version string
+	section, returnSection                                     Section
+	width, height                                              int
+	ready                                                      bool
+	input                                                      textinput.Model
+	auth                                                       authForm
+	authorInput, maxPagesInput, minCharsInput                  textinput.Model
+	results, allResults                                        []search.SearchResult
+	searching                                                  bool
+	searchErr                                                  error
+	cursor                                                     int
+	sources                                                    []search.SiteAdapter
+	sourceCursor                                               int
+	selectedSite                                               string
+	searchScopes                                               []search.SearchScope
+	scopeCursor                                                int
+	chapterOptions, activePlanOptions                          search.ChapterPlanOptions
+	modeCursor, planFocus                                      int
+	candidates                                                 []search.ChapterCandidate
+	candidateCursor                                            int
+	inspectingPlan                                             bool
+	planErr                                                    error
+	taskCancel                                                 context.CancelFunc
+	progress                                                   ProgressState
+	progressCh                                                 <-chan app.Snapshot
+	activeBook                                                 search.SearchResult
+	entries, allEntries                                        []library.Entry
+	libCursor                                                  int
+	service                                                    *app.Service
+	engine                                                     *search.Engine
+	ctx                                                        context.Context
+	cancel                                                     context.CancelFunc
+	searchCancel                                               context.CancelFunc
+	requestID, planID                                          uint64
+	version                                                    string
+	startedAt                                                  time.Time
+	startupNext                                                Section
+	preview, details, help, filtering, gPending, confirmDelete bool
+	inputReturn                                                Section
+	query, notice                                              string
+	viewOffset                                                 int
+	deleteEntry                                                library.Entry
+	diagnostic                                                 bool
+	diagnosticLog                                              string
 }
 
 type ProgressState struct {
-	total, completed, failed int
-	current                  string
-	done                     bool
-	err                      error
-	outputFile               string
-	speed                    scraper.SpeedProfile
-	failedChs                []scraper.FailedChapter
-	strategy                 search.ChapterResolveMode
+	total, completed, failed, cached int
+	current                          string
+	done                             bool
+	err                              error
+	outputFile, state, id            string
+	speed                            string
+	workers                          int64
+	requestsPerSecond                float64
 }
 
-func NewModel(searchEngine *search.Engine, scraperEngine *scraper.Engine, hist *store.History, version string) *Model {
+func NewModel(service *app.Service, version string) *Model {
 	ti := textinput.New()
-	ti.Placeholder, ti.CharLimit, ti.Width = "输入书名或作者…", 100, 50
-	ti.TextStyle = lipgloss.NewStyle().Foreground(Fg)
-	ti.PlaceholderStyle = lipgloss.NewStyle().Foreground(Subtle)
+	ti.Placeholder = "搜索书名或作者"
+	ti.CharLimit = 200
+	ti.Width = 50
 	author := textinput.New()
-	author.Placeholder, author.CharLimit, author.Width = "自动识别（可填作者名或 UID）", 100, 32
-	maxPages := textinput.New()
-	maxPages.CharLimit, maxPages.Width = 4, 8
-	minimum := textinput.New()
-	minimum.CharLimit, minimum.Width = 6, 8
+	author.Placeholder = "作者名或 UID"
+	author.CharLimit = 100
+	author.Width = 30
+	pages := textinput.New()
+	pages.CharLimit = 4
+	pages.Width = 8
+	chars := textinput.New()
+	chars.CharLimit = 6
+	chars.Width = 8
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Model{
-		section: SecSources, input: ti, auth: newAuthForm(), authorInput: author,
-		maxPagesInput: maxPages, minCharsInput: minimum,
-		sources: searchEngine.Registry().All(), engine: searchEngine,
-		scraper: scraperEngine, history: hist, entries: hist.List(),
-		ctx: ctx, cancel: cancel, version: version,
+	m := &Model{section: SecResults, startupNext: SecResults, input: ti, auth: newAuthForm(), authorInput: author, maxPagesInput: pages, minCharsInput: chars, service: service, engine: service.Search, sources: service.Search.Registry().All(), ctx: ctx, cancel: cancel, version: version, preview: true}
+	if len(m.sources) > 0 {
+		m.selectedSite = m.sources[0].Name()
 	}
+	m.SetChapterPlanDefaults(search.ChapterPlanOptions{MaxScanPages: service.Config.Yamibo.MaxScanPages, MinPostChars: service.Config.Yamibo.MinPostChars})
+	if service.Config.Startup.Animation != "off" && !service.Config.Startup.ReducedMotion && os.Getenv("TERM") != "dumb" && os.Getenv("NO_COLOR") == "" {
+		m.section = SecStartup
+	}
+	return m
 }
+
+func (m *Model) ShowLibrary() { m.section = SecLibrary; m.startupNext = SecLibrary }
 
 func (m *Model) SetChapterPlanDefaults(options search.ChapterPlanOptions) {
 	if options.MaxScanPages <= 0 {
@@ -113,117 +127,185 @@ func (m *Model) SetChapterPlanDefaults(options search.ChapterPlanOptions) {
 
 func (m *Model) setSection(section Section) tea.Cmd {
 	m.section = section
+	m.gPending = false
+	m.details = false
+	m.viewOffset = 0
+	m.notice = ""
 	m.blurPlanInputs()
+	m.input.Blur()
+	m.auth.blur()
 	if section == SecSearch {
-		m.auth.blur()
 		return m.input.Focus()
 	}
-	m.input.Blur()
 	if section == SecAuth {
 		return m.auth.focusCmd()
 	}
 	if section == SecChapterPlan && m.planFocus > 0 {
 		return m.focusPlanInput()
 	}
-	m.auth.blur()
 	return nil
 }
 
-func (m *Model) Init() tea.Cmd { return textinput.Blink }
+func (m *Model) Init() tea.Cmd {
+	if m.section == SecStartup {
+		m.startedAt = time.Now()
+		return tea.Batch(textinput.Blink, tickStartup())
+	}
+	if m.section == SecLibrary {
+		return m.loadLibrary()
+	}
+	return textinput.Blink
+}
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height, m.ready = msg.Width, msg.Height, true
-		m.input.Width = min(msg.Width-20, 60)
-		m.auth.setWidth(msg.Width - 20)
-	case scraper.Progress:
-		return m, m.handleProgress(msg)
-	case ScrapeStartedMsg:
-		if msg.Error != nil {
-			return m, m.handleProgress(scraper.Progress{ChapterIndex: -1, Error: msg.Error})
-		}
-		m.progressCh = msg.Progress
-		return m, waitProgress(m.progressCh)
-	case SearchMsg:
-		m.searching = false
-		if msg.Error != nil {
-			m.searchErr = msg.Error
-		} else {
-			m.results, m.searchErr, m.cursor = msg.Results, nil, 0
-			if len(msg.Results) > 0 {
-				cmds = append(cmds, m.setSection(SecResults))
+		m.input.Width = max(1, m.contentWidth()-7)
+		m.auth.setWidth(max(1, m.contentWidth()-8))
+		m.authorInput.Width = min(30, max(1, m.contentWidth()-14))
+		m.viewOffset = 0
+	case startupTick:
+		if m.section == SecStartup {
+			if time.Since(m.startedAt) >= startupDuration {
+				m.finishStartup()
+				if m.section == SecLibrary {
+					return m, m.loadLibrary()
+				}
+			} else {
+				return m, tickStartup()
 			}
 		}
-	case ChapterPlanMsg:
-		m.inspectingPlan, m.candidates, m.planErr = false, msg.Plan.Candidates, msg.Error
-		if m.candidateCursor >= len(m.candidates) {
-			m.candidateCursor = max(0, len(m.candidates)-1)
+	case DownloadMsg:
+		if msg.Snapshot.ID != m.progress.id && m.progress.id != "" {
+			return m, nil
 		}
+		p := msg.Snapshot
+		m.progress.id = p.ID
+		m.progress.state = p.State
+		m.progress.total = p.Total
+		m.progress.completed = p.Completed
+		m.progress.failed = p.Failed
+		m.progress.cached = p.Cached
+		m.progress.current = p.Current
+		m.progress.outputFile = p.OutputFile
+		m.progress.workers, m.progress.requestsPerSecond = p.Workers, p.RequestsPer
+		m.progress.speed = p.Speed
+		m.progress.done = p.Terminal()
+		if p.Error != "" {
+			m.progress.err = errors.New(p.Error)
+		}
+		if !m.progress.done {
+			return m, waitProgress(m.progressCh)
+		}
+		if m.taskCancel != nil {
+			m.taskCancel()
+			m.taskCancel = nil
+		}
+		return m, m.loadLibrary()
+	case ScrapeStartedMsg:
+		if msg.Error != nil {
+			m.progress.done = true
+			m.progress.err = msg.Error
+			m.progress.state = "failed"
+			if errors.Is(msg.Error, context.Canceled) {
+				m.progress.state = "canceled"
+			}
+			if m.taskCancel != nil {
+				m.taskCancel()
+				m.taskCancel = nil
+			}
+			return m, nil
+		}
+		m.progressCh = msg.Progress
+		return m, waitProgress(msg.Progress)
+	case SearchMsg:
+		if msg.ID != m.requestID || msg.Site != m.selectedSite {
+			return m, nil
+		}
+		m.searching = false
+		m.searchErr = msg.Error
+		if msg.Error == nil {
+			m.results = msg.Results
+			m.allResults = msg.Results
+			m.cursor = 0
+		}
+	case ChapterPlanMsg:
+		if msg.ID != m.planID {
+			return m, nil
+		}
+		m.inspectingPlan = false
+		m.candidates = msg.Plan.Candidates
+		m.planErr = msg.Error
+		m.candidateCursor = min(m.candidateCursor, max(0, len(m.candidates)-1))
+	case LibraryMsg:
+		if msg.Error != nil {
+			m.notice = msg.Error.Error()
+		} else {
+			m.entries = msg.Entries
+			m.allEntries = msg.Entries
+			m.libCursor = min(m.libCursor, max(0, len(m.entries)-1))
+		}
+	case diagnosticMsg:
+		m.diagnosticLog = msg.text
+	case NoticeMsg:
+		m.notice = msg.Text
 	case authenticationMsg:
 		m.auth.busy = false
 		m.auth.err = msg.err
 		if msg.err == nil {
 			m.auth.username.SetValue("")
 			m.auth.clearPassword()
-			cmds = append(cmds, m.setSection(SecSearch))
+			cmds = append(cmds, m.setSection(SecResults))
 		} else {
 			m.auth.focus = 1
 			cmds = append(cmds, m.auth.focusCmd())
 		}
 	case tea.KeyMsg:
+		if m.section == SecStartup && msg.String() != "ctrl+c" {
+			m.finishStartup()
+			if m.section == SecLibrary {
+				return m, m.loadLibrary()
+			}
+			return m, nil
+		}
 		consumed := m.handleKey(msg, &cmds)
-		if !consumed && m.section == SecAuth {
-			cmds = append(cmds, m.auth.update(msg))
-		} else if !consumed && m.section == SecChapterPlan {
-			cmds = append(cmds, m.updatePlanInput(msg))
-		} else if !consumed {
-			var cmd tea.Cmd
-			m.input, cmd = m.input.Update(msg)
-			cmds = append(cmds, cmd)
+		if !consumed {
+			switch m.section {
+			case SecAuth:
+				cmds = append(cmds, m.auth.update(msg))
+			case SecChapterPlan:
+				cmds = append(cmds, m.updatePlanInput(msg))
+			case SecSearch:
+				var cmd tea.Cmd
+				m.input, cmd = m.input.Update(msg)
+				cmds = append(cmds, cmd)
+			}
 		}
 		return m, tea.Batch(cmds...)
 	}
-	var cmd tea.Cmd
-	if m.section == SecAuth {
-		cmd = m.auth.update(msg)
-	} else if m.section == SecChapterPlan {
-		cmd = m.updatePlanInput(msg)
-	} else {
+	if m.section == SecSearch {
+		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
+		cmds = append(cmds, cmd)
 	}
-	cmds = append(cmds, cmd)
+	if m.section == SecAuth {
+		cmds = append(cmds, m.auth.update(msg))
+	}
+	if m.section == SecChapterPlan {
+		cmds = append(cmds, m.updatePlanInput(msg))
+	}
 	return m, tea.Batch(cmds...)
 }
 
-func (m *Model) handleProgress(msg scraper.Progress) tea.Cmd {
-	if msg.TotalChapters > 0 && m.progress.total == 0 {
-		m.progress.total = msg.TotalChapters
+func (m *Model) active() bool { return m.progress.state != "" && !m.progress.done }
+func (m *Model) canRetryTask() bool {
+	return m.progress.done && (m.progress.failed > 0 || m.progress.state == "canceled" || m.progress.state == "failed" || m.progress.state == "partial")
+}
+func (m *Model) visibleRows() int {
+	if m.contentHeight() <= 4 {
+		return max(1, m.contentHeight()-1)
 	}
-	switch {
-	case msg.ChapterIndex == -2:
-		m.progress.done = true
-		return nil
-	case msg.ChapterIndex < 0:
-		m.progress.done, m.progress.err = true, msg.Error
-		if msg.OutputFile != "" {
-			m.progress.outputFile = msg.OutputFile
-			format := strings.TrimPrefix(filepath.Ext(msg.OutputFile), ".")
-			if err := m.history.Add(store.HistoryEntry{Title: m.activeBook.Title, Author: m.activeBook.Author, SiteName: m.activeBook.SiteName, BookURL: m.activeBook.BookURL, Format: format, FilePath: msg.OutputFile, Chapters: m.progress.completed}); err != nil && m.progress.err == nil {
-				m.progress.err = fmt.Errorf("保存下载历史: %w", err)
-			}
-		}
-		return nil
-	case msg.Done:
-		m.progress.completed++
-		m.progress.current = msg.ChapterTitle
-	case msg.Error != nil:
-		m.progress.failed++
-		m.progress.failedChs = append(m.progress.failedChs, scraper.FailedChapter{Index: msg.ChapterIndex, Title: msg.ChapterTitle, URL: msg.ChapterURL, Error: msg.Error.Error()})
-	}
-	if !m.progress.done {
-		return waitProgress(m.progressCh)
-	}
-	return nil
+	return max(1, m.contentHeight()-3)
 }

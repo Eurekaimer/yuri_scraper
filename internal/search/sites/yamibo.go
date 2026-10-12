@@ -62,7 +62,7 @@ func NewYamiboWithPolicy(maxConcurrency int64, maxRPS float64) *Yamibo {
 	return y
 }
 
-func (y *Yamibo) Name() string                  { return "百合会" }
+func (y *Yamibo) Name() string                  { return SourceYamibo }
 func (y *Yamibo) BaseURL() string               { return y.baseURL }
 func (y *Yamibo) RequiresAuthentication() bool  { return true }
 func (y *Yamibo) MaxConcurrency() int64         { return y.maxConcurrency }

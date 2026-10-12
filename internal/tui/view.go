@@ -3,34 +3,48 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/Eurekaimer/yuri_scraper/internal/buildinfo"
-	"github.com/Eurekaimer/yuri_scraper/internal/scraper"
+	"github.com/Eurekaimer/yuri_scraper/internal/library"
 	"github.com/Eurekaimer/yuri_scraper/internal/search"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
+
+func clean(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, ansi.Strip(s))
+}
+
+func (m *Model) contentWidth() int  { return max(1, m.width-6) }
+func (m *Model) contentHeight() int { return max(1, m.height-8) }
 
 func (m *Model) View() string {
 	if !m.ready {
-		return "loading..."
+		return "正在初始化终端…"
 	}
-
-	w := max(m.width-4, 40)
-
-	header := BrandStyle.Render(" YuriScraper")
-	if m.version != "dev" {
-		header += MutedStyle.Render(" " + buildinfo.VersionLabel(m.version))
+	if m.width < 40 || m.height < 10 {
+		return fitLines("窗口过小，请放大至 40 × 10\nCtrl+C 退出", max(1, m.width), max(1, m.height), 0)
 	}
-
+	if m.section == SecStartup {
+		return m.renderStartup()
+	}
+	w, h := m.contentWidth(), m.contentHeight()
+	header := BrandStyle.Render("⚜ YURI") + MutedStyle.Render(" / ") + TitleStyle.Render("百合书房")
+	meta := clean(m.selectedSite) + " · " + buildinfo.VersionLabel(m.version)
+	header = edgeLine(header, MutedStyle.Render(meta), m.width-2)
 	var content string
 	switch m.section {
 	case SecSources:
 		content = m.renderSourcesContent()
 	case SecAuth:
 		content = m.renderAuthContent()
-	case SecSearch:
-		content = m.renderSearchWorkspace(w)
-	case SecResults:
+	case SecSearch, SecResults:
 		content = m.renderSearchWorkspace(w)
 	case SecChapterPlan:
 		content = m.renderChapterPlanContent(w)
@@ -39,386 +53,437 @@ func (m *Model) View() string {
 	case SecLibrary:
 		content = m.renderLibraryContent(w)
 	}
-
-	input := m.input.View()
-	if m.section == SecSources {
-		input = MutedStyle.Render("  先选择内容来源")
-	} else if m.section == SecAuth {
-		input = ""
-	} else if m.section == SecChapterPlan {
-		input = MutedStyle.Render("  下载: " + m.activeBook.Title)
-	} else if m.section == SecSearch || m.section == SecResults {
-		input = ""
-	} else if m.section != SecSearch {
-		input = MutedStyle.Render("  搜索: " + m.input.Value())
+	offset := m.viewOffset
+	if m.diagnostic {
+		content = m.renderDiagnostics(w)
+	} else if m.help {
+		content = m.renderHelp(w)
+	} else if m.confirmDelete {
+		content = TitleStyle.Render("移入回收站？") + "\n" + truncate(clean(m.deleteEntry.Title), w) + "\n\n文件将移入 .trash，可手动恢复。\ny 确认 · 其他键取消"
+		offset = 0
+	} else if m.section == SecAuth && h < 6 {
+		offset = max(0, 2+m.auth.focus-h+1)
+	} else if m.section == SecSources {
+		offset = max(0, m.sourceCursor+2-h+1)
+	} else if m.section == SecChapterPlan && m.planFocus > 0 {
+		offset = max(offset, 4+m.planFocus-h+1)
 	}
-	body := fmt.Sprintf("%s\n\n%s\n\n%s", header, content, m.renderStatusBar())
-	if input != "" {
-		body = fmt.Sprintf("%s\n\n%s\n\n%s\n\n%s", header, input, content, m.renderStatusBar())
+	frame := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(Primary).
+		Padding(0, 1).Render(fitLines(content, w, h, offset))
+	status := "就绪 · / 搜索书名或作者"
+	if m.searching {
+		status = "正在搜索 · x 取消 · 可继续浏览"
 	}
+	if m.searchErr != nil {
+		status = "搜索失败；保留上次结果 · r 重试 · ! 诊断"
+	}
+	if m.progress.state != "" {
+		status = fmt.Sprintf("%s · %s · %d/%d 章 · 失败 %d", stateLabel(m.progress.state), clean(m.activeBook.Title), m.progress.completed, m.progress.total, m.progress.failed)
+	}
+	if m.notice != "" {
+		status = clean(m.notice)
+	}
+	body := header + "\n" + fitLines(m.renderNavigation(), m.width-2, 1, 0) + "\n" + frame + "\n" +
+		MutedStyle.Render(fitLines(status, m.width-2, 1, 0)) + "\n" + fitLines(m.renderStatusBar(), m.width-2, 1, 0)
 	return DocStyle.Render(body)
 }
 
-func (m *Model) renderChapterPlanContent(w int) string {
+func (m *Model) renderNavigation() string {
+	items := []struct {
+		title   string
+		section Section
+	}{{"搜书 /", SecResults}, {"书源 s", SecSources}, {"书库 b", SecLibrary}, {"任务 t", SecProgress}}
+	current := m.section
+	if current == SecSearch {
+		current = m.inputReturn
+	}
+	if current == SecAuth {
+		current = SecSources
+	}
+	if current == SecChapterPlan {
+		current = SecResults
+	}
+	var tabs []string
+	for _, item := range items {
+		if current == item.section {
+			tabs = append(tabs, HighlightStyle.Render("● "+item.title))
+		} else {
+			tabs = append(tabs, MutedStyle.Render("○ "+item.title))
+		}
+	}
+	return strings.Join(tabs, "  ")
+}
+
+func (m *Model) renderSearchWorkspace(w int) string {
+	if m.contentHeight() <= 4 && m.section != SecSearch {
+		return m.resultPanels(w)
+	}
+	prompt := MutedStyle.Render("/ 输入书名或作者")
+	if m.query != "" {
+		prompt = MutedStyle.Render("搜索 · " + truncate(clean(m.query), max(1, w-7)))
+	}
+	if m.section == SecSearch {
+		label := "搜索 "
+		if m.filtering {
+			label = "筛选 "
+		}
+		prompt = HighlightStyle.Render(label) + m.input.View()
+	}
+	if m.searching {
+		prompt += ProgressStyle.Render(" · 搜索中…")
+	}
+	if m.searchErr != nil && m.section != SecSearch {
+		prompt = ErrorStyle.Render(truncate("搜索失败 · r 重试 · ! 诊断（保留上次结果）", w))
+	}
+	if m.section == SecSearch && m.inputReturn == SecLibrary && m.filtering {
+		return fitLines(prompt, w, 1, 0) + "\n\n" + m.renderLibraryList(w)
+	}
+	return fitLines(prompt, w, 1, 0) + "\n\n" + m.resultPanels(w)
+}
+
+func (m *Model) resultPanels(w int) string {
+	if len(m.results) == 0 {
+		if m.query != "" && !m.searching {
+			return MutedStyle.Render("没有匹配结果\n试试更短的关键词，或按 s 切换书源。")
+		}
+		return TitleStyle.Render("在这里，遇见下一段故事") + "\n\n" + MutedStyle.Render("○ 按 / 搜索书名或作者\n○ 按 s 选择书源\n○ 按 b 打开本地书库\n\n? 查看全部快捷键")
+	}
+	if m.details {
+		return m.bookPreview(m.results[m.cursor], w)
+	}
+	if w < 94 || !m.preview {
+		return m.renderResultsList(w)
+	}
+	left := (w - 3) * 3 / 5
+	right := w - left - 3
+	h := max(1, m.contentHeight()-2)
+	return lipgloss.JoinHorizontal(lipgloss.Top, fitLines(m.renderResultsList(left), left, h, 0),
+		MutedStyle.Render(strings.TrimSuffix(strings.Repeat(" │ \n", h), "\n")), fitLines(m.bookPreview(m.results[m.cursor], right), right, h, 0))
+}
+
+func (m *Model) bookPreview(book search.SearchResult, w int) string {
+	lines := []string{TitleStyle.Render(truncate(clean(book.Title), w)), MutedStyle.Render("作者 · " + clean(book.Author)), "", "书源 · " + clean(book.SiteName)}
+	if book.Status != "" {
+		lines = append(lines, "状态 · "+clean(book.Status))
+	}
+	if len(book.Tags) > 0 {
+		lines = append(lines, truncate(clean(strings.Join(book.Tags, " · ")), w))
+	}
+	if book.ChapterCount > 0 {
+		lines = append(lines, fmt.Sprintf("章节 · %d 章", book.ChapterCount))
+	}
+	lines = append(lines, "", HelpStyle.Render("Enter 下载 · p 章节规划"))
+	if book.Description != "" {
+		lines = append(lines, "", lipgloss.NewStyle().Width(w).Render(clean(book.Description)))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func listRow(text string, selected bool, w int) string {
+	prefix := "○ "
+	style := lipgloss.NewStyle()
+	if selected {
+		prefix, style = "● ", SelectedItemStyle
+	}
+	line := truncate(prefix+text, w)
+	return style.Render(line + strings.Repeat(" ", max(0, w-lipgloss.Width(line))))
+}
+
+func (m *Model) renderResultsList(w int) string {
 	var b strings.Builder
-	b.WriteString(TitleStyle.Render("YAMIBO PLAN // 解析策略"))
-	b.WriteString(SubtitleStyle.Render("  1/2/3 选择  j/k 移动  Tab 切换参数  Enter 继续  Esc 返回\n\n"))
-	modes := []struct{ title, detail string }{
-		{"自动识别", "优先可信目录，否则扫描首位正文作者"},
-		{"目录/电梯", "使用下方手动选择的目录候选"},
-		{"作者楼层", "按页扫描指定作者发布的长正文"},
-	}
-	for i, mode := range modes {
-		prefix := "  "
-		style := ListItemStyle
-		if i == m.modeCursor && m.planFocus == 0 {
-			prefix, style = "▸ ", SelectedItemStyle
+	start, end := visibleWindow(m.cursor, len(m.results), m.visibleRows())
+	b.WriteString(MutedStyle.Render(fmt.Sprintf("搜索结果 · %d/%d · %s", m.cursor+1, len(m.results), clean(m.activeSearchScopeName()))) + "\n")
+	for i := start; i < end; i++ {
+		r := m.results[i]
+		text := fmt.Sprintf("%02d  %s", i+1, clean(r.Title))
+		if w >= 50 {
+			authorWidth := min(18, w/4)
+			text = edgeLine(truncate(text, w-authorWidth-4), truncate(clean(r.Author), authorWidth), w-2)
 		}
-		b.WriteString(fmt.Sprintf("%s%d  %s  %s\n", prefix, i+1, style.Render(mode.title), MutedStyle.Render(mode.detail)))
-	}
-	b.WriteString("\n")
-	fields := []struct{ label, value string }{
-		{"作者名或 UID", m.authorInput.View()},
-		{"最大扫描页数", m.maxPagesInput.View()},
-		{"正文最少字符", m.minCharsInput.View()},
-	}
-	for i, field := range fields {
-		prefix := "  "
-		if m.planFocus == i+1 {
-			prefix = "▸ "
+		b.WriteString(listRow(text, i == m.cursor, w))
+		if i+1 < end {
+			b.WriteByte('\n')
 		}
-		b.WriteString(fmt.Sprintf("%s%-16s %s\n", prefix, field.label, field.value))
-	}
-	b.WriteString("\n")
-	if m.inspectingPlan {
-		b.WriteString(MutedStyle.Render("  ◌ 正在检查目录候选…"))
-	} else if len(m.candidates) > 0 {
-		candidate := m.candidates[m.candidateCursor]
-		b.WriteString(TitleStyle.Render(fmt.Sprintf("  目录候选 %d/%d", m.candidateCursor+1, len(m.candidates))))
-		b.WriteString(MutedStyle.Render(fmt.Sprintf("  h/l 切换  节点 %s  章节 %d  评分 %d\n", candidate.Source, len(candidate.Chapters), candidate.Score)))
-		for _, title := range candidate.Preview {
-			b.WriteString("    · " + truncate(title, max(10, w-8)) + "\n")
-		}
-	} else {
-		b.WriteString(MutedStyle.Render("  未发现目录候选；自动模式将回退到作者楼层。"))
-	}
-	if m.planErr != nil {
-		b.WriteString("\n" + ErrorStyle.Render("  ⚠ "+m.planErr.Error()))
 	}
 	return b.String()
 }
 
 func (m *Model) renderSourcesContent() string {
+	w := m.contentWidth()
 	var b strings.Builder
-	b.WriteString(TitleStyle.Render("SOURCE SELECT // 内容来源"))
-	b.WriteString(SubtitleStyle.Render("  j/k 移动  Enter 选择  1/2 快速选择\n\n"))
+	b.WriteString(TitleStyle.Render("选择书源") + "\n\n")
 	for i, source := range m.sources {
-		prefix, style := "  ", ListItemStyle
-		if i == m.sourceCursor {
-			prefix, style = "▸ ", SelectedItemStyle
+		label := fmt.Sprintf("%d  %s", i+1, clean(source.Name()))
+		if source.Name() == m.selectedSite {
+			label += " · 当前"
 		}
-		access := "PUBLIC"
-		if auth, ok := source.(search.CredentialsAuthenticator); ok && auth.RequiresAuthentication() {
-			access = "ACCOUNT"
-		}
-		b.WriteString(fmt.Sprintf("%s%02d  %s  %s\n", prefix, i+1, style.Render(source.Name()), MutedStyle.Render(access)))
+		b.WriteString(listRow(label, i == m.sourceCursor, w) + "\n")
 	}
+	b.WriteString("\n" + MutedStyle.Render("公开书源可直接搜索；百合会需登录。\n账号与密码仅用于当前会话。"))
 	return b.String()
 }
 
 func (m *Model) renderAuthContent() string {
-	usernameMark, passwordMark := "  ", "  "
-	if m.auth.focus == 0 {
-		usernameMark = "▶ "
-	} else {
-		passwordMark = "▶ "
-	}
-	status := MutedStyle.Render("  账号和密码仅用于本次登录请求；成功后只在内存中保留会话。")
+	status := "凭据仅用于本次会话，不会写入磁盘。"
 	if m.auth.busy {
-		status = MutedStyle.Render("  ● 正在登录百合会……")
+		status = "正在登录…"
 	} else if m.auth.err != nil {
-		status = ErrorStyle.Render("  ⚠ " + m.auth.err.Error())
+		status = clean(m.auth.err.Error())
 	}
-	return TitleStyle.Render("AUTH // 百合会账号登录") + "\n\n" +
-		usernameMark + MutedStyle.Render("账号  ") + m.auth.username.View() + "\n\n" +
-		passwordMark + MutedStyle.Render("密码  ") + m.auth.password.View() + "\n\n" +
-		status + "\n" + SubtitleStyle.Render("  Tab 切换输入框  Enter 登录  Esc 返回来源选择")
+	return TitleStyle.Render("书源登录") + "\n\n账号  " + m.auth.username.View() + "\n密码  " + m.auth.password.View() + "\n\n" + MutedStyle.Render(status)
 }
 
-func (m *Model) renderSearchWorkspace(w int) string {
-	leftWidth := min(36, max(26, w/3))
-	rightWidth := max(30, w-leftWidth-3)
-	leftStyle, rightStyle := CardStyle, CardStyle
-	leftMark, rightMark := "  ", "  "
-	if m.section == SecSearch {
-		leftStyle, leftMark = ActiveCardStyle, "▸ "
-	} else {
-		rightStyle, rightMark = ActiveCardStyle, "▸ "
-	}
-
-	var left strings.Builder
-	left.WriteString(TitleStyle.Render(leftMark + "搜索"))
-	if len(m.searchScopes) > 0 {
-		left.WriteString(MutedStyle.Render("  分区: " + m.activeSearchScopeName()))
-	}
-	left.WriteString("\n\n" + m.input.View() + "\n\n")
-	switch {
-	case m.searching:
-		left.WriteString(MutedStyle.Render("◌ 正在搜索…"))
-	case m.searchErr != nil:
-		left.WriteString(ErrorStyle.Render("⚠ " + m.searchErr.Error()))
-	case len(m.results) > 0:
-		left.WriteString(MutedStyle.Render(fmt.Sprintf("已找到 %d 部作品", len(m.results))))
-	case strings.TrimSpace(m.input.Value()) != "":
-		left.WriteString(MutedStyle.Render("没有找到作品，可按 Ctrl+F 切换分区或缩短关键词"))
-	default:
-		left.WriteString(MutedStyle.Render("输入书名或作者后按 Enter"))
-	}
-	help := "Tab / → / l 进入作品栏\n/ 随时回到搜索栏"
-	if len(m.searchScopes) > 0 {
-		help += "\nCtrl+F 切换 全部分区/译文区/文学区"
-	}
-	left.WriteString("\n\n" + HelpStyle.Render(help))
-
-	var right strings.Builder
-	right.WriteString(TitleStyle.Render(fmt.Sprintf("%s作品  %d", rightMark, len(m.results))))
-	right.WriteString("\n")
-	if len(m.results) == 0 {
-		right.WriteString("\n" + MutedStyle.Render("等待搜索结果"))
-	} else {
-		right.WriteString(m.renderResultsList(rightWidth - 4))
-	}
-
-	leftPanel := leftStyle.Width(max(20, leftWidth-4)).Render(left.String())
-	rightPanel := rightStyle.Width(max(24, rightWidth-4)).Render(right.String())
-	if w < 78 {
-		fullWidth := max(30, w-4)
-		leftPanel = leftStyle.Width(fullWidth).Render(left.String())
-		rightPanel = rightStyle.Width(fullWidth).Render(right.String())
-		return lipgloss.JoinVertical(lipgloss.Left, leftPanel, rightPanel)
-	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, " ", rightPanel)
-}
-
-func (m *Model) renderSearchContent(w int) string {
-	switch {
-	case m.searching:
-		return MutedStyle.Render("  ⏳ 正在搜索…")
-	case m.searchErr != nil:
-		return ErrorStyle.Render(fmt.Sprintf("  ⚠ %v", m.searchErr))
-	case len(m.results) == 0 && m.input.Value() != "":
-		return MutedStyle.Render("  无结果，试试缩短关键词")
-	case len(m.results) == 0:
-		return MutedStyle.Render("  输入关键词搜索小说…")
-	default:
-		return m.renderResultsContent(w)
-	}
-}
-
-func (m *Model) renderResultsContent(w int) string {
+func (m *Model) renderChapterPlanContent(w int) string {
 	var b strings.Builder
-	b.WriteString(TitleStyle.Render(fmt.Sprintf("▸ %d 个结果", len(m.results))))
-	b.WriteString(SubtitleStyle.Render("  j/k移动  g/G首尾  Ctrl+D/U翻页  Enter下载  Tab或/切回输入\n"))
-
-	b.WriteString(m.renderResultsList(w))
-	return b.String()
-}
-
-func (m *Model) renderResultsList(w int) string {
-	var b strings.Builder
-	start, end := visibleWindow(m.cursor, len(m.results), 12)
-	for i := start; i < end; i++ {
-		r := m.results[i]
-		prefix, style := "  ", ListItemStyle
-		if i == m.cursor {
-			prefix, style = "▸ ", SelectedItemStyle
+	b.WriteString(TitleStyle.Render("章节规划") + "\n")
+	for i, mode := range []string{"自动识别目录或作者正文", "目录模式 · 选择候选目录", "作者模式 · 限页扫描正文"} {
+		b.WriteString(listRow(mode, i == m.modeCursor && m.planFocus == 0, w) + "\n")
+	}
+	b.WriteString("\n作者 / UID  " + m.authorInput.View() + "\n扫描页数    " + m.maxPagesInput.View() + "\n最少字数    " + m.minCharsInput.View() + "\n\n")
+	if m.inspectingPlan {
+		b.WriteString("正在识别目录…")
+	} else if len(m.candidates) > 0 {
+		c := m.candidates[m.candidateCursor]
+		b.WriteString(fmt.Sprintf("候选 %d/%d · %d 章 · 评分 %d\n", m.candidateCursor+1, len(m.candidates), len(c.Chapters), c.Score))
+		for _, title := range c.Preview {
+			b.WriteString("  " + truncate(clean(title), w-2) + "\n")
 		}
-		line := prefix + style.Render(r.Title)
-		if r.Author != "" {
-			line += MutedStyle.Render(" — " + r.Author)
-		}
-		if r.Status != "" {
-			line += MutedStyle.Render(" [" + r.Status + "]")
-		}
-		if len(r.Tags) > 0 {
-			line += MutedStyle.Render(" " + r.Tags[0])
-		}
-		if r.Replies > 0 || r.Views > 0 {
-			line += MutedStyle.Render(fmt.Sprintf("  ↩%d  ◉%d", r.Replies, r.Views))
-		}
-		b.WriteString(truncate(line, w))
-		b.WriteString("\n")
+	} else {
+		b.WriteString("未找到目录；自动模式可尝试作者正文。")
+	}
+	b.WriteString("\n" + MutedStyle.Render("扫描受页数上限约束，不保证收录全帖。"))
+	if m.planErr != nil {
+		b.WriteString("\n" + ErrorStyle.Render(clean(m.planErr.Error())))
 	}
 	return b.String()
 }
 
 func (m *Model) renderProgressContent(w int) string {
+	if m.progress.state == "" {
+		return TitleStyle.Render("下载任务") + "\n\n" + MutedStyle.Render("暂无任务\n搜索后按 Enter 下载，完成后按 b 查看书库。")
+	}
 	var b strings.Builder
-	b.WriteString(TitleStyle.Render("▸ 抓取进度"))
-	b.WriteString(MutedStyle.Render(speedIndicator(m.progress.speed)))
-	if m.progress.strategy != "" {
-		b.WriteString(MutedStyle.Render("  策略: " + string(m.progress.strategy)))
-	}
-	b.WriteString("\n\n")
-
-	if m.progress.done {
-		if m.progress.err != nil {
-			b.WriteString(ErrorStyle.Render(fmt.Sprintf("  ✗ %v", m.progress.err)))
-		} else if m.progress.failed > 0 {
-			b.WriteString(ErrorStyle.Render("  ⚠ 部分完成，失败章节已写入清单"))
-			b.WriteString(fmt.Sprintf("\n  文件: %s\n", m.progress.outputFile))
-			b.WriteString(fmt.Sprintf("  共 %d 章 | 成功 %d | 失败 %d\n",
-				m.progress.total, m.progress.completed, m.progress.failed))
-		} else {
-			b.WriteString(SuccessStyle.Render("  ✓ 抓取完成"))
-			b.WriteString(fmt.Sprintf("\n  文件: %s\n", m.progress.outputFile))
-			b.WriteString(fmt.Sprintf("  共 %d 章 | 成功 %d | 失败 %d\n",
-				m.progress.total, m.progress.completed, m.progress.failed))
-		}
-	} else if m.progress.total > 0 {
+	b.WriteString(TitleStyle.Render(truncate(clean(m.activeBook.Title), w)) + "\n\n")
+	b.WriteString(HighlightStyle.Render(stateLabel(m.progress.state)) + "\n")
+	if m.progress.total > 0 {
 		ratio := float64(m.progress.completed+m.progress.failed) / float64(m.progress.total)
-		b.WriteString(renderBar(ratio, w-4))
-		b.WriteString(fmt.Sprintf("\n  %d/%d 章  (%d 失败)", m.progress.completed, m.progress.total, m.progress.failed))
-		if m.progress.current != "" {
-			t := m.progress.current
-			if r := []rune(t); len(r) > 40 {
-				t = string(r[:40]) + "…"
-			}
-			b.WriteString("\n  " + MutedStyle.Render("当前: "+t))
-		}
-	} else {
-		b.WriteString(ProgressStyle.Render("  ⏳ 获取章节列表中…"))
+		b.WriteString(renderBar(ratio, max(1, w-7)) + fmt.Sprintf(" %3.0f%%\n", ratio*100))
 	}
-
-	if len(m.progress.failedChs) > 0 {
-		b.WriteString(fmt.Sprintf("\n\n  %s 完成后按 R 重试 %d 个失败章节",
-			ErrorStyle.Render("⚠"), len(m.progress.failedChs)))
+	b.WriteString(fmt.Sprintf("\n章节 %d/%d · 失败 %d · 缓存 %d\n", m.progress.completed, m.progress.total, m.progress.failed, m.progress.cached))
+	if m.progress.workers > 0 {
+		b.WriteString(MutedStyle.Render(fmt.Sprintf("%s · %d 并发 · 每秒 %g 请求\n", speedLabel(m.progress.speed), m.progress.workers, m.progress.requestsPerSecond)))
+	}
+	if m.progress.current != "" {
+		b.WriteString("\n" + truncate(clean(m.progress.current), w))
+	}
+	if m.progress.outputFile != "" {
+		b.WriteString("\n\n" + truncate(clean(m.progress.outputFile), w))
+	}
+	if m.progress.err != nil {
+		b.WriteString("\n\n" + ErrorStyle.Render(clean(m.progress.err.Error())))
+	}
+	if m.active() {
+		b.WriteString("\n\n" + HelpStyle.Render("Esc 返回浏览，下载继续 · x 取消任务"))
 	}
 	return b.String()
+}
+
+func (m *Model) renderLibraryList(w int) string {
+	if len(m.entries) == 0 {
+		return MutedStyle.Render("书库暂无匹配文件\n下载书籍，或在下载目录放入 EPUB / PDF / TXT。")
+	}
+	var b strings.Builder
+	start, end := visibleWindow(m.libCursor, len(m.entries), m.visibleRows())
+	b.WriteString(MutedStyle.Render(fmt.Sprintf("本地书籍 · %d/%d", m.libCursor+1, len(m.entries))) + "\n")
+	for i := start; i < end; i++ {
+		e := m.entries[i]
+		state := stateLabel(e.State)
+		if e.Missing {
+			state = "文件缺失"
+		}
+		meta := clean(e.Format) + " · " + state
+		line := edgeLine(truncate(clean(e.Title), max(1, w-lipgloss.Width(meta)-4)), meta, w-2)
+		b.WriteString(listRow(line, i == m.libCursor, w))
+		if i+1 < end {
+			b.WriteByte('\n')
+		}
+	}
+	return b.String()
+}
+
+func libraryPreview(entry library.Entry, w int) string {
+	return TitleStyle.Render(truncate(clean(entry.Title), w)) + "\n\n作者 · " + clean(entry.Author) + "\n" + clean(entry.Format) + " · " + stateLabel(entry.State) + "\n\n" + HelpStyle.Render("Enter 打开 · v 定位 · d 回收") + "\n\n" + lipgloss.NewStyle().Width(w).Render(clean(entry.FilePath))
 }
 
 func (m *Model) renderLibraryContent(w int) string {
-	var b strings.Builder
-	b.WriteString(TitleStyle.Render("▸ 已下载书库"))
-	b.WriteString(SubtitleStyle.Render("  j/k 移动  Esc 返回\n"))
-
-	if len(m.entries) == 0 {
-		return b.String() + MutedStyle.Render("  还没有下载过任何小说")
+	if m.details && m.libCursor < len(m.entries) {
+		return libraryPreview(m.entries[m.libCursor], w)
 	}
-
-	start, end := visibleWindow(m.libCursor, len(m.entries), 12)
-	for i := start; i < end; i++ {
-		e := m.entries[i]
-		prefix, style := "  ", ListItemStyle
-		if i == m.libCursor {
-			prefix, style = "▸ ", SelectedItemStyle
-		}
-		line := fmt.Sprintf("%s%s", prefix, style.Render(e.Title))
-		if e.Author != "" {
-			line += MutedStyle.Render(" — " + e.Author)
-		}
-		line += MutedStyle.Render(fmt.Sprintf("  [%s] [%d章] %s",
-			e.Format, e.Chapters, e.Downloaded.Format("01-02")))
-		b.WriteString(truncate(line, w))
-		b.WriteString("\n")
+	body := m.renderLibraryList(w)
+	if m.contentHeight() <= 4 {
+		return body
 	}
-	return b.String()
+	if m.preview && w >= 94 && m.libCursor < len(m.entries) {
+		left, h := (w-3)*3/5, max(1, m.contentHeight()-2)
+		body = lipgloss.JoinHorizontal(lipgloss.Top, fitLines(m.renderLibraryList(left), left, h, 0), MutedStyle.Render(strings.TrimSuffix(strings.Repeat(" │ \n", h), "\n")), fitLines(libraryPreview(m.entries[m.libCursor], w-left-3), w-left-3, h, 0))
+	}
+	return TitleStyle.Render("本地书库") + "\n\n" + body
 }
 
 func (m *Model) renderStatusBar() string {
-	switch m.section {
-	case SecSources:
-		return StatusBarStyle.Render(key("1/2") + " 来源  " + key("Enter") + " 选择  " + key("Ctrl+C") + " 退出")
-	case SecAuth:
-		return StatusBarStyle.Render(key("Tab") + " 切换账号/密码  " + key("Enter") + " 登录  " + key("Esc") + " 返回  " + key("Ctrl+C") + " 退出")
-	case SecSearch, SecResults:
-		scopeHelp := ""
-		if len(m.searchScopes) > 0 {
-			scopeHelp = key("Ctrl+F") + " 分区  "
-		}
-		return StatusBarStyle.Render(
-			key("Enter") + " 搜索/下载  " + scopeHelp + key("Tab/←/→/Alt+h/l") + " 分栏切换  " + key("/") + " 搜索栏  " +
-				key("Ctrl+S") + " 来源  " + key("Ctrl+L") + " 书库  " + key("Ctrl+C") + " 退出")
-	case SecChapterPlan:
-		return StatusBarStyle.Render(key("1/2/3") + " 模式  " + key("Tab") + " 参数  " + key("h/l") + " 候选  " + key("Enter") + " 继续  " + key("Esc") + " 返回")
-	case SecProgress:
-		if m.progress.done {
-			return StatusBarStyle.Render(
-				key("Enter/Esc") + " 返回结果  " + key("R") + " 重试失败  " + key("Ctrl+C") + " 退出")
-		}
-		return StatusBarStyle.Render(
-			key("1/2/3") + " 速度档  " + key("Ctrl+C") + " 退出")
-	case SecLibrary:
-		return StatusBarStyle.Render(key("Esc") + " 返回  " + key("Ctrl+C") + " 退出")
+	if m.diagnostic {
+		return StatusBarStyle.Render("↑↓ 滚动 · r 刷新 · Esc 返回")
 	}
-	return ""
+	if m.help {
+		return StatusBarStyle.Render("↑↓ 滚动 · PgUp/PgDn 翻页 · Esc 关闭")
+	}
+	if m.section == SecResults && m.searchErr != nil {
+		return StatusBarStyle.Render("r 重试 · / 修改关键词 · ! 诊断")
+	}
+	if m.section == SecProgress && m.progress.err != nil {
+		return StatusBarStyle.Render("r 重试 · ! 诊断 · Esc 返回")
+	}
+	if m.confirmDelete {
+		return StatusBarStyle.Render("y 确认回收 · 其他键取消")
+	}
+	if m.width < 72 {
+		switch m.section {
+		case SecSearch:
+			return StatusBarStyle.Render("Enter 提交 · Esc 返回")
+		case SecAuth:
+			return StatusBarStyle.Render("Tab 切换 · Enter 登录 · Esc 返回")
+		case SecChapterPlan:
+			return StatusBarStyle.Render("Tab 字段 · Enter 开始 · PgDn 下翻")
+		case SecProgress:
+			if m.active() {
+				return StatusBarStyle.Render("a/d 调速 · x 取消 · Esc 返回")
+			}
+			if m.canRetryTask() {
+				return StatusBarStyle.Render("r 重试 · Esc 返回 · ! 诊断")
+			}
+			return StatusBarStyle.Render("Esc 返回 · b 书库 · ! 诊断")
+		case SecLibrary:
+			return StatusBarStyle.Render("↑↓ 选择 · Enter 打开 · ? 帮助")
+		case SecSources:
+			return StatusBarStyle.Render("↑↓ 选择 · Enter 确认 · Esc 返回")
+		}
+		return StatusBarStyle.Render("↑↓ 选择 · Enter 下载 · ? 帮助")
+	}
+	switch m.section {
+	case SecSearch:
+		return StatusBarStyle.Render("输入模式 · Enter 提交 · Esc 保留草稿并返回")
+	case SecAuth:
+		return StatusBarStyle.Render("Tab 切换字段 · Enter 登录 · Esc 返回")
+	case SecChapterPlan:
+		return StatusBarStyle.Render("j/k 模式 · h/l 候选 · Tab 字段 · Enter 开始 · PgUp/PgDn 翻页")
+	case SecProgress:
+		if m.active() {
+			return StatusBarStyle.Render("a/d 调速 · 1/2/3 档位 · x 取消 · Esc 浏览 · b 书库")
+		}
+		if m.canRetryTask() {
+			return StatusBarStyle.Render("r 重试 · Esc 浏览 · b 书库 · ! 诊断")
+		}
+		return StatusBarStyle.Render("Esc 浏览 · b 书库 · ! 诊断 · ? 帮助")
+	case SecLibrary:
+		return StatusBarStyle.Render("j/k 选择 · Enter 打开 · / 筛选 · v 定位 · d 回收 · ? 帮助")
+	case SecSources:
+		return StatusBarStyle.Render("j/k 选择 · Enter 确认 · Esc 返回 · ? 帮助")
+	}
+	return StatusBarStyle.Render("j/k 选择 · Enter 下载 · / 搜索 · f 筛选 · ? 帮助 · ! 诊断")
 }
 
+func (m *Model) renderHelp(w int) string {
+	return TitleStyle.Render("键盘操作") + "\n\n" +
+		"j/k 或 ↑↓      选择条目\ngg / G         首项 / 末项\nCtrl+U/D       上 / 下半页\n/ 或 i         搜索（输入模式）\nf              筛选已有结果\nCtrl+F         切换搜索分区\nl / Esc        详情 / 返回\nTab            开关宽屏预览\ns / b / t      书源 / 书库 / 任务\np              论坛章节规划\nEnter          下载 / 打开\nv / d          定位 / 移入回收站\nr              重试搜索或失败任务\n!              错误诊断与最近日志\na / d          任务页减速 / 加速\n1 / 2 / 3      慢速 / 标准 / 快速\nx              取消搜索或下载\nq / Ctrl+C     退出并取消任务\nPgUp/PgDn      长页面翻页\n\n输入模式下 j/k/h/l/q 均为普通文字。\n浏览其他页面时，下载仍会继续。\n实际并发与速率受配置和书源上限约束。\n\nEsc 或 ? 关闭帮助。"
+}
+
+func stateLabel(state string) string {
+	switch state {
+	case "planning":
+		return "正在规划"
+	case "downloading":
+		return "正在下载"
+	case "exporting":
+		return "正在导出"
+	case "completed":
+		return "已完成"
+	case "partial":
+		return "部分完成"
+	case "failed":
+		return "失败"
+	case "canceled":
+		return "已取消"
+	case "imported":
+		return "本地导入"
+	case "missing":
+		return "文件缺失"
+	case "":
+		return "就绪"
+	default:
+		return clean(state)
+	}
+}
+func speedLabel(speed string) string {
+	switch strings.ToLower(speed) {
+	case "slow":
+		return "慢速"
+	case "fast":
+		return "快速"
+	case "", "normal":
+		return "标准"
+	default:
+		return clean(speed)
+	}
+}
 func (m *Model) activeSearchScopeName() string {
 	if m.scopeCursor <= 0 || m.scopeCursor > len(m.searchScopes) {
 		return "全部分区"
 	}
 	return m.searchScopes[m.scopeCursor-1].Name
 }
-
-// --- helpers ---
-
-func speedIndicator(sp scraper.SpeedProfile) string {
-	sel := func(p scraper.SpeedProfile) string {
-		if sp == p {
-			return "▶"
-		}
-		return " "
-	}
-	return fmt.Sprintf("  速度: [%s慢速%s | %s正常%s | %s快速%s]  按1/2/3切换",
-		sel(scraper.SpeedSlow), selIf(sp == scraper.SpeedSlow, "◀", ""),
-		sel(scraper.SpeedNormal), selIf(sp == scraper.SpeedNormal, "◀", ""),
-		sel(scraper.SpeedFast), selIf(sp == scraper.SpeedFast, "◀", ""),
-	)
+func visibleWindow(cursor, total, visible int) (int, int) {
+	visible = max(1, visible)
+	start := max(0, cursor-visible/2)
+	end := min(total, start+visible)
+	return max(0, end-visible), end
 }
-
-func visibleWindow(cursor, total, visible int) (start, end int) {
-	start = cursor - visible/2
-	if start < 0 {
-		start = 0
-	}
-	end = start + visible
-	if end > total {
-		end = total
-		start = max(0, end-visible)
-	}
-	return
-}
-
 func renderBar(ratio float64, width int) string {
-	if ratio > 1 {
-		ratio = 1
-	}
+	width = max(0, width)
+	ratio = min(1.0, max(0.0, ratio))
 	filled := int(ratio * float64(width))
-	return ProgressStyle.Render(strings.Repeat("█", filled) + strings.Repeat("░", width-filled))
+	return ProgressStyle.Render(strings.Repeat("━", filled)) + MutedStyle.Render(strings.Repeat("─", width-filled))
+}
+func truncate(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	return ansi.Truncate(s, width, "…")
 }
 
-func truncate(s string, maxWidth int) string {
-	if lipgloss.Width(s) <= maxWidth {
-		return s
-	}
+// All measurements are terminal cells, not bytes or rune counts. Reserve the
+// frame and footer before cropping so resizing never pushes controls offscreen.
+func fitLines(text string, w, h, offset int) string {
+	lines := strings.Split(text, "\n")
+	offset = min(max(0, offset), max(0, len(lines)-h))
 	var b strings.Builder
-	for _, r := range s {
-		if lipgloss.Width(b.String()+string(r)+"…") > maxWidth {
-			break
+	for row := range h {
+		line := ""
+		if row+offset < len(lines) {
+			line = truncate(lines[row+offset], w)
 		}
-		b.WriteRune(r)
+		b.WriteString(line)
+		b.WriteString(strings.Repeat(" ", max(0, w-lipgloss.Width(line))))
+		if row+1 < h {
+			b.WriteByte('\n')
+		}
 	}
-	return b.String() + "…"
+	return b.String()
 }
-
-func key(label string) string {
-	return lipgloss.NewStyle().Foreground(Accent).Render(label)
-}
-
-func selIf(cond bool, t, f string) string {
-	if cond {
-		return t
+func edgeLine(left, right string, w int) string {
+	left = truncate(left, w)
+	remaining := w - lipgloss.Width(left)
+	if remaining < lipgloss.Width(right)+2 {
+		return left
 	}
-	return f
+	return left + strings.Repeat(" ", remaining-lipgloss.Width(right)) + right
 }

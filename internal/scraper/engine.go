@@ -2,10 +2,12 @@ package scraper
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,12 +46,32 @@ func (sp SpeedProfile) rateLimit() float64 {
 func (sp SpeedProfile) String() string {
 	switch sp {
 	case SpeedSlow:
-		return "慢速"
+		return "Slow"
 	case SpeedFast:
-		return "快速"
+		return "Fast"
 	default:
-		return "正常"
+		return "Normal"
 	}
+}
+
+// SpeedProfiles lists the presets from slowest to fastest so interfaces can
+// move between them without hard-coding the order.
+func SpeedProfiles() []SpeedProfile { return []SpeedProfile{SpeedSlow, SpeedNormal, SpeedFast} }
+
+// Slower returns the next lower preset, reporting false at the slowest one.
+func (sp SpeedProfile) Slower() (SpeedProfile, bool) {
+	if sp <= SpeedSlow {
+		return SpeedSlow, false
+	}
+	return sp - 1, true
+}
+
+// Faster returns the next higher preset, reporting false at the fastest one.
+func (sp SpeedProfile) Faster() (SpeedProfile, bool) {
+	if sp >= SpeedFast {
+		return SpeedFast, false
+	}
+	return sp + 1, true
 }
 
 type Config struct {
@@ -78,22 +100,35 @@ type FailedChapter struct {
 	URL   string `json:"url"`
 	Error string `json:"error"`
 }
+
+// Progress is a latest-state event. Intermediate events may be coalesced when a
+// consumer is slow; cumulative counts and the last terminal event are authoritative.
 type Progress struct {
-	ChapterIndex             int
-	ChapterTitle, ChapterURL string
-	TotalChapters            int
-	Done, Cached             bool
-	Error                    error
-	OutputFile, FailedFile   string
+	ChapterIndex                   int
+	ChapterTitle, ChapterURL       string
+	TotalChapters                  int
+	Completed, Failed, CachedCount int
+	Phase                          string
+	Done, Cached                   bool
+	Error                          error
+	OutputFile, FailedFile         string
 }
 
-// Engine owns scrape policy and orchestration. Worker execution and output
-// persistence live in worker.go and output.go respectively.
+var ErrEngineBusy = errors.New("scraper engine already has an active book")
+
+// Engine owns one active scrape, including planning and export. Chapter bodies
+// are checkpointed on disk rather than retained in the worker result queue.
 type Engine struct {
-	cfg                            Config
-	limiter                        *rate.Limiter
-	concurrency, speed, maxWorkers atomic.Int64
-	maxRateBits                    atomic.Uint64
+	cfg                          Config
+	limiter                      *rate.Limiter
+	running                      atomic.Bool
+	mu                           sync.Mutex
+	requestedWorkers, maxWorkers int64
+	requestedRate, maxRate       float64
+	profile                      SpeedProfile
+	concurrency                  int64
+	activeWorkers                int64
+	changed                      chan struct{}
 }
 
 func NewEngine(cfg Config) *Engine {
@@ -115,61 +150,144 @@ func NewEngine(cfg Config) *Engine {
 		workers = cfg.SpeedProfile.concurrency()
 	}
 	rps := cfg.RateLimit
-	if rps <= 0 {
+	if rps <= 0 || math.IsNaN(rps) || math.IsInf(rps, 0) {
 		rps = cfg.SpeedProfile.rateLimit()
 	}
-	e := &Engine{cfg: cfg, limiter: rate.NewLimiter(rate.Limit(rps), 1)}
-	e.speed.Store(int64(cfg.SpeedProfile))
-	e.maxWorkers.Store(64)
-	e.maxRateBits.Store(math.Float64bits(math.MaxFloat64))
-	e.concurrency.Store(workers)
+	e := &Engine{cfg: cfg, limiter: rate.NewLimiter(rate.Limit(rps), 1), requestedWorkers: workers, requestedRate: rps, profile: cfg.SpeedProfile, maxWorkers: 64, maxRate: math.MaxFloat64, changed: make(chan struct{})}
+	e.concurrency = min(workers, e.maxWorkers)
 	return e
 }
 
-func (e *Engine) SetSpeed(sp SpeedProfile) { e.speed.Store(int64(sp)); e.applySpeed(sp) }
-func (e *Engine) applySpeed(sp SpeedProfile) {
-	workers := sp.concurrency()
-	if maximum := e.maxWorkers.Load(); maximum > 0 && workers > maximum {
-		workers = maximum
+// SetSpeed explicitly replaces configured startup policy; source limits still win.
+func (e *Engine) SetSpeed(sp SpeedProfile) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if sp < SpeedSlow || sp > SpeedFast {
+		sp = SpeedNormal
 	}
-	rps := sp.rateLimit()
-	if maximum := math.Float64frombits(e.maxRateBits.Load()); maximum > 0 && rps > maximum {
-		rps = maximum
+	e.profile = sp
+	e.requestedWorkers, e.requestedRate = sp.concurrency(), sp.rateLimit()
+	e.applyPolicyLocked()
+}
+
+// Speed reports the preset currently in effect, which is what an interface
+// should display and step from.
+func (e *Engine) Speed() SpeedProfile {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.profile
+}
+
+// Budget reports the worker count and request rate currently in effect after
+// configured values, the selected speed profile, and the source policy are
+// reconciled. Interfaces show these numbers instead of naming a profile that a
+// source cap may have reduced.
+func (e *Engine) Budget() (workers int64, requestsPerSecond float64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return min(e.concurrency, e.maxWorkers), min(e.requestedRate, e.maxRate)
+}
+
+func (e *Engine) applyPolicyLocked() {
+	e.concurrency = min(e.requestedWorkers, e.maxWorkers)
+	e.limiter.SetLimit(rate.Limit(min(e.requestedRate, e.maxRate)))
+	close(e.changed)
+	e.changed = make(chan struct{})
+}
+
+func (e *Engine) acquireWorker(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		e.mu.Lock()
+		if e.activeWorkers < e.concurrency {
+			e.activeWorkers++
+			e.mu.Unlock()
+			return nil
+		}
+		changed := e.changed
+		e.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
 	}
-	e.concurrency.Store(workers)
-	e.limiter.SetLimit(rate.Limit(rps))
-	e.limiter.SetBurst(1)
+}
+
+func (e *Engine) releaseWorker() {
+	e.mu.Lock()
+	e.activeWorkers--
+	close(e.changed)
+	e.changed = make(chan struct{})
+	e.mu.Unlock()
 }
 
 func (e *Engine) ScrapeBook(ctx context.Context, adapter search.SiteAdapter, bookURL string, meta search.SearchResult) (<-chan Progress, error) {
 	return e.ScrapeBookWithOptions(ctx, adapter, bookURL, meta, search.ChapterPlanOptions{})
 }
+
 func (e *Engine) ScrapeBookWithOptions(ctx context.Context, adapter search.SiteAdapter, bookURL string, meta search.SearchResult, options search.ChapterPlanOptions) (<-chan Progress, error) {
-	e.maxWorkers.Store(64)
-	e.maxRateBits.Store(math.Float64bits(math.MaxFloat64))
+	if !e.running.CompareAndSwap(false, true) {
+		return nil, ErrEngineBusy
+	}
+	started := false
+	defer func() {
+		if !started {
+			e.running.Store(false)
+		}
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if adapter == nil {
+		return nil, fmt.Errorf("source adapter is required")
+	}
+	if e.cfg.Format != "epub" && e.cfg.Format != "txt" {
+		return nil, fmt.Errorf("unsupported output format %q", e.cfg.Format)
+	}
+	e.mu.Lock()
+	e.maxWorkers, e.maxRate = 64, math.MaxFloat64
 	if policy, ok := adapter.(search.ScrapePolicyProvider); ok {
 		if maximum := policy.MaxConcurrency(); maximum > 0 {
-			e.maxWorkers.Store(maximum)
+			e.maxWorkers = min(maximum, e.maxWorkers)
 		}
-		if maximum := policy.MaxRequestsPerSecond(); maximum > 0 {
-			e.maxRateBits.Store(math.Float64bits(maximum))
+		if maximum := policy.MaxRequestsPerSecond(); maximum > 0 && !math.IsNaN(maximum) {
+			e.maxRate = min(maximum, e.maxRate)
 		}
 	}
-	e.applySpeed(SpeedProfile(e.speed.Load()))
-	cacheDir := filepath.Join(e.cfg.OutputDir, ".cache", shortHash(bookCacheKey(adapter.Name(), bookURL)))
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create checkpoint directory: %w", err)
+	e.applyPolicyLocked()
+	workerCount := min(e.maxWorkers, max(e.requestedWorkers, SpeedFast.concurrency()))
+	e.mu.Unlock()
+	meta.BookURL, meta.SiteName = bookURL, adapter.Name()
+	cacheRoot := filepath.Join(e.cfg.OutputDir, ".cache")
+	cacheDir := filepath.Join(cacheRoot, shortHash(bookCacheKey(adapter.Name(), bookURL)))
+	if err := os.MkdirAll(e.cfg.OutputDir, 0o755); err != nil {
+		return nil, fmt.Errorf("create output directory: %w", err)
+	}
+	for _, dir := range []string{cacheRoot, cacheDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("create checkpoint directory: %w", err)
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("secure checkpoint directory: %w", err)
+		}
 	}
 	chapters, err := e.resolveChapters(ctx, adapter, bookURL, cacheDir, options)
 	if err != nil {
 		return nil, fmt.Errorf("get chapter list: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	chapters = e.applyRange(chapters)
 	if len(chapters) == 0 {
 		return nil, fmt.Errorf("no chapters in range")
 	}
-	progress := make(chan Progress, min(len(chapters)+2, 256))
-	go e.run(ctx, adapter, meta, chapters, cacheDir, progress)
+	progress := make(chan Progress, 1)
+	started = true
+	go e.run(ctx, adapter, meta, chapters, cacheDir, int(min(workerCount, int64(len(chapters)))), progress)
 	return progress, nil
 }
 
@@ -181,6 +299,9 @@ func (e *Engine) resolveChapters(ctx context.Context, adapter search.SiteAdapter
 	options.CheckpointPath = filepath.Join(cacheDir, "chapter-plan.json")
 	upstreamSink := options.ContentSink
 	options.ContentSink = func(chapter search.Chapter, content string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if upstreamSink != nil {
 			if err := upstreamSink(chapter, content); err != nil {
 				return err
@@ -196,10 +317,7 @@ func (e *Engine) resolveChapters(ctx context.Context, adapter search.SiteAdapter
 }
 
 func (e *Engine) applyRange(chapters []search.Chapter) []search.Chapter {
-	start, end := e.cfg.StartChapter, e.cfg.EndChapter
-	if start < 0 {
-		start = 0
-	}
+	start, end := max(e.cfg.StartChapter, 0), e.cfg.EndChapter
 	if end <= 0 || end > len(chapters) {
 		end = len(chapters)
 	}

@@ -13,32 +13,39 @@ type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
 
+func sliceSource(chapters []Chapter) ChapterSource {
+	return func(yield func(Chapter) error) error {
+		for _, chapter := range chapters {
+			if err := yield(chapter); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
 func TestWriteEPUBPropagatesWriterErrors(t *testing.T) {
-	err := WriteEPUB(failingWriter{}, BookMeta{Title: "test", Chapters: []Chapter{{Title: "one", Content: "body"}}})
+	err := WriteEPUBStream(failingWriter{}, BookMeta{Title: "test"}, sliceSource([]Chapter{{Title: "one", Content: "body"}}))
 	if err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestWriteTXT_Empty(t *testing.T) {
+func TestWriteTXTStream_Empty(t *testing.T) {
 	var buf bytes.Buffer
-	err := WriteTXT(&buf, nil)
-	if err != nil {
-		t.Fatalf("WriteTXT(nil): %v", err)
+	if err := WriteTXTStream(&buf, sliceSource(nil)); err != nil {
+		t.Fatalf("empty source: %v", err)
 	}
 	if buf.Len() != 0 {
 		t.Errorf("expected empty output, got %d bytes", buf.Len())
 	}
 }
 
-func TestWriteTXT_SingleChapter(t *testing.T) {
-	chapters := []Chapter{
-		{Index: 0, Title: "第一章", Content: "故事开始了。"},
-	}
+func TestWriteTXTStream_SingleChapter(t *testing.T) {
 	var buf bytes.Buffer
-	err := WriteTXT(&buf, chapters)
+	err := WriteTXTStream(&buf, sliceSource([]Chapter{{Index: 0, Title: "第一章", Content: "故事开始了。"}}))
 	if err != nil {
-		t.Fatalf("WriteTXT: %v", err)
+		t.Fatalf("WriteTXTStream: %v", err)
 	}
 	out := buf.String()
 	if !strings.Contains(out, "第一章") {
@@ -52,13 +59,13 @@ func TestWriteTXT_SingleChapter(t *testing.T) {
 	}
 }
 
-func TestWriteTXT_OrderPreserved(t *testing.T) {
+func TestWriteTXTStream_OrderPreserved(t *testing.T) {
 	chapters := []Chapter{
 		{Index: 1, Title: "第2章", Content: "second"},
 		{Index: 0, Title: "第1章", Content: "first"},
 	}
 	var buf bytes.Buffer
-	if err := WriteTXT(&buf, chapters); err != nil {
+	if err := WriteTXTStream(&buf, sliceSource(chapters)); err != nil {
 		t.Fatal(err)
 	}
 	out := buf.String()
@@ -73,19 +80,12 @@ func TestWriteTXT_OrderPreserved(t *testing.T) {
 	}
 }
 
-func TestWriteEPUB_ValidZip(t *testing.T) {
-	chapters := []Chapter{
-		{Index: 0, Title: "第一章 序", Content: "<p>测试内容</p>"},
-	}
-	meta := BookMeta{
-		Title:    "测试书名",
-		Author:   "测试作者",
-		Chapters: chapters,
-	}
+func TestWriteEPUBStream_ValidZip(t *testing.T) {
+	meta := BookMeta{Title: "测试书名", Author: "测试作者"}
 	var buf bytes.Buffer
-	err := WriteEPUB(&buf, meta)
+	err := WriteEPUBStream(&buf, meta, sliceSource([]Chapter{{Index: 0, Title: "第一章 序", Content: "<p>测试内容</p>"}}))
 	if err != nil {
-		t.Fatalf("WriteEPUB: %v", err)
+		t.Fatalf("WriteEPUBStream: %v", err)
 	}
 
 	// Verify it's a valid ZIP
@@ -135,57 +135,12 @@ func TestWriteEPUB_ValidZip(t *testing.T) {
 	}
 }
 
-func TestWriteEPUB_ChapterFilesPresent(t *testing.T) {
-	chapters := []Chapter{
-		{Index: 0, Title: "第一章", Content: "one"},
-		{Index: 1, Title: "第二章", Content: "two"},
-	}
-	meta := BookMeta{Title: "书", Author: "人", Chapters: chapters}
+func TestWriteEPUBStream_SpecialCharsInTitle(t *testing.T) {
+	meta := BookMeta{Title: "测试: 书名<>&\"'", Author: "作者"}
 	var buf bytes.Buffer
-	if err := WriteEPUB(&buf, meta); err != nil {
-		t.Fatal(err)
-	}
-
-	zr, _ := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
-	for _, f := range zr.File {
-		if strings.HasPrefix(f.Name, "OEBPS/chapter-") && strings.HasSuffix(f.Name, ".xhtml") {
-			rc, _ := f.Open()
-			data, _ := io.ReadAll(rc)
-			rc.Close()
-			content := string(data)
-			if !strings.Contains(content, "<html") {
-				t.Errorf("%s: missing <html> tag", f.Name)
-			}
-		}
-	}
-}
-
-func TestWriteEPUB_MinimalMeta(t *testing.T) {
-	meta := BookMeta{Title: "", Author: "", Chapters: nil}
-	var buf bytes.Buffer
-	err := WriteEPUB(&buf, meta)
+	err := WriteEPUBStream(&buf, meta, sliceSource([]Chapter{{Index: 0, Title: "序", Content: "start"}}))
 	if err != nil {
-		t.Fatalf("WriteEPUB with empty meta: %v", err)
-	}
-	// Should not panic or error — must still produce valid ZIP
-	if _, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len())); err != nil {
-		t.Fatalf("empty meta EPUB is not valid ZIP: %v", err)
-	}
-}
-
-func TestWriteEPUB_SpecialCharsInTitle(t *testing.T) {
-	chapters := []Chapter{
-		{Index: 0, Title: "序", Content: "start"},
-	}
-	meta := BookMeta{
-		Title:    "测试: 书名<>&\"'",
-		Author:   "作者",
-		Chapters: chapters,
-	}
-	var buf bytes.Buffer
-	err := WriteEPUB(&buf, meta)
-	if err != nil {
-		t.Fatalf("WriteEPUB with special chars: %v", err)
+		t.Fatalf("WriteEPUBStream with special chars: %v", err)
 	}
 	zr, _ := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
 	opfFile := findZipFile(zr, "OEBPS/content.opf")

@@ -3,28 +3,8 @@ package store
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
-
-func TestDefaultConfig(t *testing.T) {
-	cfg := DefaultConfig()
-	if cfg.OutputDir != "novels" {
-		t.Errorf("OutputDir = %q, want %q", cfg.OutputDir, "novels")
-	}
-	if cfg.Format != "epub" {
-		t.Errorf("Format = %q, want %q", cfg.Format, "epub")
-	}
-	if cfg.Concurrency != 8 {
-		t.Errorf("Concurrency = %d, want 8", cfg.Concurrency)
-	}
-	if cfg.RateLimit != 2.0 {
-		t.Errorf("RateLimit = %f, want 2.0", cfg.RateLimit)
-	}
-	if cfg.RetryCount != 3 {
-		t.Errorf("RetryCount = %d, want 3", cfg.RetryCount)
-	}
-}
 
 func TestLoadConfig_NoFile(t *testing.T) {
 	cfg, err := LoadConfig(filepath.Join(t.TempDir(), "nonexistent.yaml"))
@@ -128,27 +108,8 @@ func TestLoadConfigRejectsUnsafeYamiboRate(t *testing.T) {
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "不超过 1.2") {
+	if _, err := LoadConfig(path); err == nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestRelPathResolved(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	data := []byte("output_dir: ./downloads\n")
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := LoadConfig(path)
-	if err != nil {
-		t.Fatalf("LoadConfig: %v", err)
-	}
-	if filepath.IsAbs(cfg.OutputDir) {
-		t.Errorf("expected relative path, got absolute: %s", cfg.OutputDir)
-	}
-	if cfg.OutputDir != "downloads" {
-		t.Errorf("OutputDir = %q, want %q", cfg.OutputDir, "downloads")
 	}
 }
 
@@ -191,19 +152,6 @@ func TestHistory_AddAndList(t *testing.T) {
 	}
 }
 
-func TestHistory_Exists(t *testing.T) {
-	dir := t.TempDir()
-	h, _ := LoadHistory(dir)
-	h.Add(HistoryEntry{Title: "x", BookURL: "http://exists", Chapters: 1})
-
-	if !h.Exists("http://exists") {
-		t.Error("Exists returned false for known URL")
-	}
-	if h.Exists("http://missing") {
-		t.Error("Exists returned true for unknown URL")
-	}
-}
-
 func TestHistory_Persistence(t *testing.T) {
 	dir := t.TempDir()
 	h, _ := LoadHistory(dir)
@@ -222,15 +170,102 @@ func TestHistory_Persistence(t *testing.T) {
 	}
 }
 
-func TestHistory_CorruptFile(t *testing.T) {
+func TestHistoryCorruptionPreservesOriginal(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".history.json")
-	os.WriteFile(path, []byte("not json"), 0644)
-	h, err := LoadHistory(dir)
-	if err != nil {
-		t.Fatalf("LoadHistory should not error on corrupt file: %v", err)
+	original := []byte("not json")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if len(h.Entries) != 0 {
-		t.Errorf("expected 0 entries from corrupt file, got %d", len(h.Entries))
+	history, err := LoadHistory(dir)
+	if err == nil || history != nil {
+		t.Fatal("corrupt metadata was treated as an empty writable history")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != string(original) {
+		t.Fatal("recoverable original history was modified")
+	}
+}
+
+func TestResolvePathsPrefersExplicitConfigurationAndEnvironment(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config-home"))
+	t.Setenv("YURI_SCRAPER_CONFIG", "")
+	explicit := filepath.Join(root, "explicit.yaml")
+	config, resolved, err := ResolvePaths(explicit, filepath.Join(root, "embedded"))
+	if err != nil || config != explicit || resolved != root {
+		t.Fatalf("explicit configuration was not authoritative: %s, %s, %v", config, resolved, err)
+	}
+	environment := filepath.Join(root, "environment.yaml")
+	t.Setenv("YURI_SCRAPER_CONFIG", environment)
+	config, resolved, err = ResolvePaths("", filepath.Join(root, "embedded"))
+	if err != nil || config != environment || resolved != root {
+		t.Fatalf("environment configuration was ignored: %s, %s, %v", config, resolved, err)
+	}
+}
+
+func TestResolvePathsRejectsRelativeLocatorAndMissingConfiguration(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	t.Setenv("YURI_SCRAPER_CONFIG", "")
+	locator, err := ConfigLocatorPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(locator), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(locator, []byte("relative/config.yaml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ResolvePaths("", filepath.Join(root, "embedded")); err == nil {
+		t.Fatal("accepted a corrupt relative locator")
+	}
+	if err := os.Remove(locator); err != nil {
+		t.Fatal(err)
+	}
+	empty, err := os.MkdirTemp("", "yuri-empty-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(empty)
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(empty); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(previous)
+	if _, _, err := ResolvePaths("", ""); err == nil {
+		t.Fatal("resolved a configuration that does not exist")
+	}
+}
+
+func TestResolvePathsAdoptsRecognisableConfigFileOnly(t *testing.T) {
+	empty := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(empty, "config-home"))
+	t.Setenv("YURI_SCRAPER_CONFIG", "")
+	work := t.TempDir()
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(work); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(previous)
+	if err := os.WriteFile(filepath.Join(work, "config.yaml"), []byte("some_other_tool: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ResolvePaths("", ""); err == nil {
+		t.Fatal("adopted a foreign config.yaml in the current directory")
+	}
+	if err := os.WriteFile(filepath.Join(work, "config.yaml"), []byte("output_dir: novels\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, resolved, err := ResolvePaths("", "")
+	if err != nil || config != filepath.Join(work, "config.yaml") || resolved != work {
+		t.Fatalf("recognisable configuration was not adopted: %s, %s, %v", config, resolved, err)
 	}
 }

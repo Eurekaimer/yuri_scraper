@@ -50,7 +50,7 @@ func (f *authForm) blur() {
 }
 
 func (f *authForm) setWidth(width int) {
-	width = min(max(width, 20), 60)
+	width = min(max(width, 1), 60)
 	f.username.Width = width
 	f.password.Width = width
 }

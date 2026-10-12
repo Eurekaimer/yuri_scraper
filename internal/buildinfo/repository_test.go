@@ -14,8 +14,8 @@ func TestRepositoryBuildEntrypointsUseReleaseVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	version := strings.TrimSpace(string(versionData))
-	if version != "0.6.2" {
-		t.Fatalf("release/VERSION = %q, want 0.6.2", version)
+	if version != "0.7.0" {
+		t.Fatalf("release/VERSION = %q, want 0.7.0", version)
 	}
 
 	checks := []struct {

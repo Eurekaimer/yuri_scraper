@@ -1,15 +1,18 @@
-# YuriScraper v0.6.2 — 使用说明
+# YuriScraper v0.7.0 — 使用说明
 
 ## Windows
 
-直接双击 `yuri-scraper-v0.6.2-windows-amd64.exe` 即可运行。
+直接双击 `yuri-scraper-v0.7.0-windows-amd64.exe` 即可运行。
 
 > 如果 Windows Defender 报警，点击「更多信息」→「仍要运行」。
 > `amd64` = 64位 Intel/AMD 处理器，绝大多数 Windows 电脑都是这个。
 
 ```
-yuri-scraper-v0.6.2-windows-amd64.exe
+yuri-scraper-v0.7.0-windows-amd64.exe
 ```
+
+第一次运行会在配置文件同目录创建 `novels/` 作为书库，并显示 TUI。也可以直接
+使用命令行，例如 `yuri-scraper-v0.7.0-windows-amd64.exe --help`。
 
 ---
 
@@ -18,8 +21,8 @@ yuri-scraper-v0.6.2-windows-amd64.exe
 先给执行权限，然后运行：
 
 ```bash
-chmod +x yuri-scraper-v0.6.2-linux-amd64
-./yuri-scraper-v0.6.2-linux-amd64
+chmod +x yuri-scraper-v0.7.0-linux-amd64
+./yuri-scraper-v0.7.0-linux-amd64
 ```
 
 > Linux 可执行文件**不需要 .exe 后缀**，这是 Windows 特有的。
@@ -27,35 +30,75 @@ chmod +x yuri-scraper-v0.6.2-linux-amd64
 
 | 文件 | 适用平台 |
 |------|---------|
-| `yuri-scraper-v0.6.2-linux-amd64` | Intel/AMD 64位 Linux |
-| `yuri-scraper-v0.6.2-linux-arm64` | ARM 64位 Linux（树莓派4/5、AWS Graviton） |
+| `yuri-scraper-v0.7.0-linux-amd64` | Intel/AMD 64位 Linux |
+| `yuri-scraper-v0.7.0-linux-arm64` | ARM 64位 Linux（树莓派4/5、AWS Graviton） |
 
 ---
 
 ## macOS
 
 ```bash
-chmod +x yuri-scraper-v0.6.2-darwin-arm64
-./yuri-scraper-v0.6.2-darwin-arm64
+chmod +x yuri-scraper-v0.7.0-darwin-arm64
+./yuri-scraper-v0.7.0-darwin-arm64
 ```
 
 | 文件 | 适用平台 |
 |------|---------|
-| `yuri-scraper-v0.6.2-darwin-arm64` | Apple Silicon（M1/M2/M3/M4） |
-| `yuri-scraper-v0.6.2-darwin-amd64` | Intel Mac（2019及之前） |
+| `yuri-scraper-v0.7.0-darwin-arm64` | Apple Silicon（M1/M2/M3/M4） |
+| `yuri-scraper-v0.7.0-darwin-amd64` | Intel Mac（2019及之前） |
 
 > macOS 可能会提示「无法验证开发者」。解决方法：
 > **系统设置 → 隐私与安全性 → 仍要打开**，或终端执行：
 > ```bash
-> xattr -d com.apple.quarantine yuri-scraper-v0.6.2-darwin-arm64
+> xattr -d com.apple.quarantine yuri-scraper-v0.7.0-darwin-arm64
 > ```
 
 ---
 
 ## 配置文件
 
-将 `config.yaml` 放在程序同目录，启动时自动读取。
-不放置则使用默认配置（下载到 `novels/`，输出 EPUB）。
+把 `config.yaml` 放在程序所在目录即可自动读取。相对 `output_dir`（默认
+`novels`）相对于**配置文件所在目录**解析，因此从任意工作目录启动，书库位置
+都一致。不放置配置文件也可以运行，程序使用默认值并在首次运行时创建目录。
+
+查找顺序：`--config` 参数 → `YURI_SCRAPER_CONFIG` 环境变量 → 源码安装记录的
+路径 → 包含当前可执行文件的源码目录 → 当前目录向上找到的项目根目录。
+若查到的配置文件已不存在，程序会直接报错并停止，不会另外新建一套书库。
+
+---
+
+## 命令行
+
+不带子命令直接进入 TUI；结果输出到 stdout，诊断与进度输出到 stderr，
+`--json` 可用于脚本：
+
+```bash
+yuri-scraper search --source 52shuku --json "书名"
+yuri-scraper download --source 52shuku "https://www.52shuku.net/gl/1/abc.html"
+yuri-scraper library list --json
+yuri-scraper open <ID>            # 用系统默认阅读器打开
+yuri-scraper remove <ID> --yes    # 移入 .trash，可恢复
+yuri-scraper install              # 安装到 ~/.local/bin，无需 sudo；多个源码目录时用 --root DIR
+yuri-scraper logs                 # 查看最近 100 条诊断日志
+yuri-scraper --debug              # 额外记录 52 书库请求状态与耗时
+```
+
+退出码：`0` 成功，`1` 失败，`2` 参数错误，`3` 部分下载，`130` 用户中止。
+
+---
+
+## 界面与排错
+
+开屏先显示白色花瓣、黄色轮廓的百合花，再显示 YURI 大字字符画，任意键可跳过。
+主界面为淡黄色圆角边框：顶部品牌与分区导航，中部列表（`○` 普通、`●` 选中整行
+高亮），底部固定状态栏和快捷键提示；宽度达到 100 列时列表与详情并排显示。
+搜索失败会保留上次结果，按 `r` 重试、`x` 取消搜索、`!` 打开诊断面板查看原始
+错误、恢复建议与最近日志；下载失败同样可用 `r` 重试，已下载章节缓存不会丢失。
+
+日志位于 `<output_dir>/.diagnostics.log`（本用户可读、单文件上限 2 MiB，
+保留一个备份），记录会话、搜索结果数、失败的 52 书库请求以及任务开始与结束；
+`--debug` 会额外记录成功请求的端点、状态与耗时。日志不写入搜索词、账号、
+密码、Cookie、请求头或正文。
 
 ---
 
@@ -66,3 +109,6 @@ A: `.exe` 是 Windows 专属的可执行文件后缀。Linux 和 macOS 通过文
 
 **Q: 我应该下载哪个？**
 A: Windows → `windows-amd64.exe` | Intel Mac → `darwin-amd64` | M1+ Mac → `darwin-arm64` | 普通 Linux → `linux-amd64` | 树莓派 → `linux-arm64`
+
+**Q: 下载中断了会丢内容吗？**
+A: 不会。已成功章节保存在 `novels/.cache/`，重新运行同一本书只补缺失章节。

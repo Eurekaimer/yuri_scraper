@@ -3,98 +3,188 @@ package sites
 import (
 	"context"
 	"fmt"
-	"io"
+	"log/slog"
+	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/Eurekaimer/yuri_scraper/internal/diagnostics"
+
 	"github.com/Eurekaimer/yuri_scraper/internal/search"
+	"github.com/Eurekaimer/yuri_scraper/internal/transport"
 	"github.com/PuerkitoBio/goquery"
 )
 
-// Site52Shuku adapts 52shuku.net.
+const (
+	// Source52Shuku and SourceYamibo are the canonical source names registered in
+	// the registry. Callers resolve user aliases to these values instead of
+	// repeating display strings.
+	Source52Shuku = "52书库"
+	SourceYamibo  = "百合会"
+)
+
+const (
+	// Absolute sanity ceilings for the request budget. 52shuku is a public book
+	// site with no recorded source-specific hard limit, so the configured
+	// concurrency and rate_limit of the application stay authoritative up to
+	// these bounds instead of being silently replaced by a fixed profile.
+	shukuMaxConcurrency int64 = 64
+	shukuMaxRPS               = 20.0
+	shukuMaxBodyBytes   int64 = 8 << 20
+
+	// Defaults used by New52Shuku, matching store.DefaultConfig.
+	shukuDefaultConcurrency int64 = 8
+	shukuDefaultRPS               = 2.0
+)
+
+// Site52Shuku budgets every request, including search, metadata and redirects.
 type Site52Shuku struct {
-	baseURL string
-	client  *http.Client
+	mu             sync.RWMutex
+	baseURL        string
+	client         *http.Client
+	maxConcurrency int64
+	maxRPS         float64
 }
 
-// New52Shuku creates the 52shuku adapter.
 func New52Shuku() *Site52Shuku {
-	return &Site52Shuku{
-		baseURL: "https://www.52shuku.net",
-		client: &http.Client{
-			Timeout: 15 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) >= 5 {
-					return fmt.Errorf("too many redirects")
-				}
-				return nil
-			},
+	return New52ShukuWithPolicy(shukuDefaultConcurrency, shukuDefaultRPS)
+}
+
+// New52ShukuWithPolicy honors the requested request budget and clamps it only to
+// the absolute sanity ceiling. Lower configured values are preserved so a
+// conservative configuration is never silently raised.
+func New52ShukuWithPolicy(maxConcurrency int64, maxRPS float64) *Site52Shuku {
+	if maxConcurrency <= 0 {
+		maxConcurrency = shukuDefaultConcurrency
+	}
+	if !(maxRPS > 0) || math.IsNaN(maxRPS) || math.IsInf(maxRPS, 0) {
+		maxRPS = shukuDefaultRPS
+	}
+	maxConcurrency = min(maxConcurrency, shukuMaxConcurrency)
+	maxRPS = min(maxRPS, shukuMaxRPS)
+	s := &Site52Shuku{baseURL: "https://www.52shuku.net", maxConcurrency: maxConcurrency, maxRPS: maxRPS}
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	base.MaxConnsPerHost = int(maxConcurrency)
+	base.MaxIdleConnsPerHost = int(maxConcurrency)
+	base.ResponseHeaderTimeout = 15 * time.Second
+	base.MaxResponseHeaderBytes = 64 << 10
+	s.client = &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport.NewBoundedTransport(base, maxConcurrency, maxRPS, shukuMaxBodyBytes, s.validateURL),
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return &transport.PermanentError{Err: fmt.Errorf("too many redirects")}
+			}
+			return s.validateURL(req.URL)
 		},
 	}
+	return s
 }
 
-func (s *Site52Shuku) Name() string    { return "52书库" }
-func (s *Site52Shuku) BaseURL() string { return s.baseURL }
+func (s *Site52Shuku) Name() string { return Source52Shuku }
+func (s *Site52Shuku) BaseURL() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.baseURL
+}
+func (s *Site52Shuku) MaxConcurrency() int64         { return s.maxConcurrency }
+func (s *Site52Shuku) MaxRequestsPerSecond() float64 { return s.maxRPS }
 
-func (s *Site52Shuku) doGet(ctx context.Context, urlStr string) (*goquery.Document, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+// SetBaseURL allows only local HTTP fixtures; it never changes request budgets.
+func (s *Site52Shuku) SetBaseURL(raw string) error {
+	parsed, err := url.Parse(raw)
 	if err != nil {
-		return nil, err
+		return &transport.PermanentError{Err: fmt.Errorf("invalid fixture URL: %w", err)}
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-	req.Header.Set("Cache-Control", "no-cache")
+	host := strings.ToLower(parsed.Hostname())
+	ip := net.ParseIP(host)
+	if parsed.Scheme != "http" || (host != "localhost" && (ip == nil || !ip.IsLoopback())) || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return &transport.PermanentError{Err: fmt.Errorf("base URL override must be an HTTP loopback origin")}
+	}
+	s.mu.Lock()
+	s.baseURL = strings.TrimSuffix(parsed.String(), "/")
+	s.mu.Unlock()
+	return nil
+}
 
+func (s *Site52Shuku) validateURL(target *url.URL) error {
+	base, _ := url.Parse(s.BaseURL())
+	allowed := target.User == nil
+	if base.Scheme == "http" {
+		allowed = allowed && target.Scheme == base.Scheme && target.Host == base.Host
+	} else {
+		host := strings.ToLower(target.Hostname())
+		allowed = allowed && target.Scheme == "https" && (host == "www.52shuku.net" || host == "52shuku.net") && (target.Port() == "" || target.Port() == "443")
+	}
+	if !allowed {
+		return &transport.PermanentError{Err: fmt.Errorf("request URL is outside the selected 52shuku origin")}
+	}
+	return nil
+}
+
+func (s *Site52Shuku) doGet(ctx context.Context, rawURL string) (document *goquery.Document, resultErr error) {
+	started := time.Now()
+	status := 0
+	// Never persist URL queries, credentials, headers or response bodies.
+	endpoint := ""
+	if target, err := url.Parse(rawURL); err == nil {
+		endpoint = target.Host + target.EscapedPath()
+	}
+	defer func() {
+		if resultErr != nil {
+			slog.Error("52shuku.request.failed", "endpoint", endpoint, "status", status, "elapsed_ms", time.Since(started).Milliseconds(), diagnostics.Failure(resultErr))
+		} else {
+			slog.Debug("52shuku.request.completed", "endpoint", endpoint, "status", status, "elapsed_ms", time.Since(started).Milliseconds())
+		}
+	}()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, &transport.PermanentError{Err: err}
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, diagnoseError(err, urlStr)
+		return nil, fmt.Errorf("52shuku request failed: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode == 503 || resp.StatusCode == 403 {
-		// Possible Cloudflare block
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		if strings.Contains(string(body), "Cloudflare") || strings.Contains(string(body), "cf-") {
-			return nil, fmt.Errorf("网站开启了 Cloudflare 防护，请稍后重试 (HTTP %d)", resp.StatusCode)
-		}
-		return nil, fmt.Errorf("网站拒绝访问 (HTTP %d)，可能 IP 被限制", resp.StatusCode)
-	}
-
+	status = resp.StatusCode
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("服务器返回 HTTP %d", resp.StatusCode)
+		return nil, &transport.HTTPError{URL: rawURL, StatusCode: resp.StatusCode, Delay: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())}
 	}
-
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("解析页面失败: %w", err)
+		if transport.CanRetry(err) {
+			return nil, fmt.Errorf("read HTML page: %w", err)
+		}
+		return nil, &transport.PermanentError{Err: fmt.Errorf("parse HTML page: %w", err)}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return doc, nil
 }
 
-// diagnoseError wraps network errors with actionable Chinese messages.
-func diagnoseError(err error, urlStr string) error {
-	msg := err.Error()
-	switch {
-	case strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded"):
-		return fmt.Errorf("网络超时: 52书库响应较慢，请检查网络或稍后重试")
-	case strings.Contains(msg, "connection refused"):
-		return fmt.Errorf("无法连接 52书库: 网站可能暂时不可用")
-	case strings.Contains(msg, "no such host"):
-		return fmt.Errorf("无法解析域名: 请检查 DNS 设置")
-	case strings.Contains(msg, "EOF") || strings.Contains(msg, "reset"):
-		return fmt.Errorf("连接被重置: 网站可能限制了访问频率，请降低速度档位")
-	default:
-		return fmt.Errorf("网络错误: %w", err)
+func parseRetryAfter(raw string, now time.Time) time.Duration {
+	if seconds, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 32); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
 	}
+	if date, err := http.ParseTime(raw); err == nil {
+		return max(date.Sub(now), 0)
+	}
+	return 0
 }
 
 func (s *Site52Shuku) Search(ctx context.Context, query string) ([]search.SearchResult, error) {
 	// 52shuku search: /so/search.php?q=<query>
-	searchURL := fmt.Sprintf("%s/so/search.php?q=%s", s.baseURL, url.QueryEscape(query))
+	searchURL := fmt.Sprintf("%s/so/search.php?q=%s", s.BaseURL(), url.QueryEscape(query))
 
 	doc, err := s.doGet(ctx, searchURL)
 	if err != nil {
@@ -105,35 +195,15 @@ func (s *Site52Shuku) Search(ctx context.Context, query string) ([]search.Search
 
 	// Parse <article class="excerpt"> blocks
 	doc.Find("article.excerpt").Each(func(_ int, sel *goquery.Selection) {
-		// Title link: <a href="..."><h4>N. 书名_<em>作者</em>【状态】</h4></a>
+		// Title link: <a href="..."><h4>N. 书名_作者【状态】</h4></a>. The site
+		// wraps the matched query text in <em>, so the heading is treated as
+		// plain text and split exactly like the book page: "title_author【status】".
 		link := sel.Find("header h2 a").First()
 		href, _ := link.Attr("href")
 
 		fullTitle := strings.TrimSpace(link.Find("h4").Text())
 		fullTitle = rx(`^\d+\.\s*`).ReplaceAllString(fullTitle, "")
-
-		author := strings.TrimSpace(link.Find("em").First().Text())
-		title := fullTitle
-		if author != "" {
-			title = strings.Replace(title, author, "", 1)
-		}
-		title = rx(`【[^】]*】$`).ReplaceAllString(title, "")
-		title = strings.Trim(title, "_ -\u3000")
-		title = strings.TrimSpace(title)
-
-		// Status from title
-		status := ""
-		if strings.Contains(fullTitle, "完结") {
-			status = "已完结"
-		}
-
-		// Description from <span class="note">
-		noteText := strings.TrimSpace(sel.Find("span.note").Text())
-		desc := rx(`\[.*?\]`).ReplaceAllString(noteText, "")
-		desc = rx(`《.*?》作者：[^【]*【.*?】`).ReplaceAllString(desc, "")
-		desc = strings.TrimSpace(strings.TrimPrefix(desc, "简介："))
-		desc = strings.TrimSpace(strings.TrimPrefix(desc, "文案："))
-		desc = strings.Trim(desc, "\u3000 \t\n\r")
+		title, author, status := parseBookTitle(fullTitle)
 
 		// Category from <span class="muted">
 		category := ""
@@ -144,11 +214,26 @@ func (s *Site52Shuku) Search(ctx context.Context, query string) ([]search.Search
 			}
 		})
 
+		// The category/heat line is nested inside the note, so drop it before
+		// reading the synopsis; otherwise "所属栏目/获赞" leaks into descriptions.
+		note := sel.Find("span.note")
+		note.Find("p.auth-span, span.muted").Remove()
+		noteText := strings.TrimSpace(note.Text())
+		desc := rx(`\[.*?\]`).ReplaceAllString(noteText, "")
+		desc = rx(`《.*?》作者：[^【]*【.*?】`).ReplaceAllString(desc, "")
+		desc = strings.TrimSpace(strings.TrimPrefix(desc, "简介："))
+		desc = strings.TrimSpace(strings.TrimPrefix(desc, "文案："))
+		desc = strings.Trim(desc, "\u3000 \t\n\r")
+
 		if title != "" && href != "" && !strings.HasPrefix(href, "#") {
+			resolved, err := s.resolveLink(searchURL, href)
+			if err != nil {
+				return
+			}
 			result := search.SearchResult{
 				Title:       title,
 				Author:      author,
-				BookURL:     href,
+				BookURL:     resolved,
 				SiteName:    s.Name(),
 				Description: truncate(desc, 200),
 				Status:      status,
@@ -171,70 +256,76 @@ func truncate(s string, n int) string {
 	return string(runes[:n]) + "…"
 }
 
-var reChapterLink = regexp.MustCompile(`<li class="mulu"><a href="(.*?)">(.*?)</a></li>`)
+func (s *Site52Shuku) resolveLink(baseURL, href string) (string, error) {
+	base, err := url.Parse(baseURL)
+	if err != nil {
+		return "", &transport.PermanentError{Err: err}
+	}
+	link, err := url.Parse(strings.TrimSpace(href))
+	if err != nil {
+		return "", &transport.PermanentError{Err: err}
+	}
+	resolved := base.ResolveReference(link)
+	resolved.Fragment = ""
+	if err := s.validateURL(resolved); err != nil {
+		return "", err
+	}
+	return resolved.String(), nil
+}
 
 func (s *Site52Shuku) GetChapterList(ctx context.Context, bookURL string) ([]search.Chapter, error) {
 	doc, err := s.doGet(ctx, bookURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch chapter list: %w", err)
 	}
-
-	html, err := doc.Html()
-	if err != nil {
-		return nil, fmt.Errorf("get html: %w", err)
-	}
-
-	matches := reChapterLink.FindAllStringSubmatch(html, -1)
-	chapters := make([]search.Chapter, 0, len(matches))
-
-	// 52shuku: the directory page URL itself is often chapter 1
-	// and _2.html, _3.html are subsequent pages
-
-	for i, m := range matches {
-		link := m[1]
-		title := strings.TrimSpace(m[2])
-
-		// Resolve relative URLs
-		if !strings.HasPrefix(link, "http") {
-			if strings.HasPrefix(link, "/") {
-				link = s.baseURL + link
-			} else if strings.Contains(bookURL, "/") {
-				// Relative to book URL directory
-				parts := strings.Split(bookURL, "/")
-				parts = parts[:len(parts)-1]
-				link = strings.Join(parts, "/") + "/" + link
-			}
+	var chapters []search.Chapter
+	seen := make(map[string]bool)
+	var linkErr error
+	doc.Find("li.mulu a[href]").EachWithBreak(func(_ int, selection *goquery.Selection) bool {
+		href, _ := selection.Attr("href")
+		link, err := s.resolveLink(bookURL, href)
+		if err != nil {
+			linkErr = err
+			return false
 		}
-
-		chapters = append(chapters, search.Chapter{
-			Index:    i + 1,
-			Title:    title,
-			URL:      link,
-			SiteName: s.Name(),
-		})
+		if seen[link] {
+			return true
+		}
+		seen[link] = true
+		chapters = append(chapters, search.Chapter{Index: len(chapters) + 1, Title: pageTitle(strings.TrimSpace(selection.Text()), len(chapters)+1), URL: link, SiteName: s.Name()})
+		return true
+	})
+	if linkErr != nil {
+		return nil, linkErr
 	}
-
-	// 52shuku pages are numbered _2, _3, ... — the main page has no content
-	// Do NOT insert bookURL as a page
 	if len(chapters) == 0 {
-		return nil, fmt.Errorf("no chapter pages found on %s", bookURL)
+		return nil, &transport.PermanentError{Err: fmt.Errorf("no chapter pages found on %s", bookURL)}
 	}
-
-	// Renumber after potential insertion
-	for i := range chapters {
-		chapters[i].Index = i + 1
-	}
-
 	return chapters, nil
 }
 
+// pageTitle labels a catalog entry. 52shuku names its catalog entries "第N页",
+// which is a reading page rather than a story chapter, so an empty or generic
+// label becomes "Page N" and keeps the output language consistent.
+func pageTitle(label string, position int) string {
+	if label == "" {
+		return fmt.Sprintf("Page %d", position)
+	}
+	if strings.HasPrefix(label, "第") && strings.HasSuffix(label, "页") {
+		return fmt.Sprintf("Page %d", position)
+	}
+	return label
+}
+
 var (
-	reScript   = regexp.MustCompile(`<script[\s\S]*?</script>`)
-	reHTMLTag  = regexp.MustCompile(`<[^>]+>`)
-	reBr       = regexp.MustCompile(`(?i)</p>|<br\s*/?>`)
-	reCount    = regexp.MustCompile(`共(\d+)页`)
-	reBoiler   = regexp.MustCompile(`(?i)(目录|上一页|下一页|尾页|哦豁.*|传送门.*|Tips.*|52书库App.*|阅读记录.*|加入收藏.*|关灯|护眼|字体.*|[|].*书单推荐.*)`)
-	reChapterH = regexp.MustCompile(`第[\d零一二三四五六七八九十百千]+章\s*[^\n]*`)
+	reScript  = regexp.MustCompile(`<script[\s\S]*?</script>`)
+	reHTMLTag = regexp.MustCompile(`<[^>]+>`)
+	reBr      = regexp.MustCompile(`(?i)</(?:p|div|h[1-6])>|<br\s*/?>`)
+	// The synopsis block on the first reading page begins with a bracketed
+	// category line and ends immediately before the first chapter heading. Go's
+	// \s does not include the ideographic space used in these pages, so it is
+	// listed explicitly; the captured heading is kept by the replacement.
+	reSynopsisHead = regexp.MustCompile(`(?s)^[\s　]*\[[^\]]*\][\s　]*《.*?(\n[\s　]*第[0-9零一二三四五六七八九十百千]+章)`)
 )
 
 func (s *Site52Shuku) GetChapterContent(ctx context.Context, pageURL string) (string, error) {
@@ -243,15 +334,19 @@ func (s *Site52Shuku) GetChapterContent(ctx context.Context, pageURL string) (st
 		return "", fmt.Errorf("fetch page: %w", err)
 	}
 
-	// Extract content from <article class="article-content" id="nr1">
-	article := doc.Find("article.article-content#nr1")
+	// Live reading pages use <article class="article-content">; older pages and
+	// fixtures may also carry id="nr1". Matching the class alone covers both.
+	article := doc.Find("article.article-content").First()
 	if article.Length() == 0 {
-		return "", fmt.Errorf("content block not found in %s", pageURL)
+		article = doc.Find("#nr1").First()
+	}
+	if article.Length() == 0 {
+		return "", &transport.PermanentError{Err: fmt.Errorf("content block not found in %s", pageURL)}
 	}
 
 	html, err := article.Html()
 	if err != nil {
-		return "", fmt.Errorf("get article html: %w", err)
+		return "", &transport.PermanentError{Err: fmt.Errorf("get article HTML: %w", err)}
 	}
 
 	// Clean: remove scripts
@@ -262,6 +357,12 @@ func (s *Site52Shuku) GetChapterContent(ctx context.Context, pageURL string) (st
 	html = reHTMLTag.ReplaceAllString(html, "")
 	// Decode entities
 	html = htmlUnescape(html)
+	// The first reading page repeats the book page's synopsis block before the
+	// story starts; the EPUB already carries that synopsis as metadata, so drop
+	// it instead of duplicating it as chapter text. The cut is anchored on the
+	// first real chapter heading so it does not depend on summary field names.
+	// Go's \s does not include the ideographic space used here, so it is listed.
+	html = reSynopsisHead.ReplaceAllString(html, "$1")
 	// Clean up whitespace and filter boilerplate
 	lines := strings.Split(html, "\n")
 	cleaned := make([]string, 0, len(lines))
@@ -273,7 +374,11 @@ func (s *Site52Shuku) GetChapterContent(ctx context.Context, pageURL string) (st
 		cleaned = append(cleaned, line)
 	}
 
-	return strings.Join(cleaned, "\n"), nil
+	content := strings.Join(cleaned, "\n")
+	if strings.TrimSpace(content) == "" {
+		return "", &transport.PermanentError{Err: fmt.Errorf("chapter page contains no readable content")}
+	}
+	return content, nil
 }
 
 // isBoilerplate filters out 52shuku navigation/promotional text.
@@ -295,6 +400,34 @@ func isBoilerplate(line string) bool {
 	return false
 }
 
+// ResolveBook derives direct-download identity and metadata from the book page.
+func (s *Site52Shuku) ResolveBook(ctx context.Context, bookURL string) (*search.SearchResult, error) {
+	doc, err := s.doGet(ctx, bookURL)
+	if err != nil {
+		return nil, fmt.Errorf("resolve book: %w", err)
+	}
+	title, author, status := parseBookTitle(strings.TrimSpace(doc.Find("h1.article-title").First().Text()))
+	if title == "" {
+		return nil, &transport.PermanentError{Err: fmt.Errorf("book title not found on %s", bookURL)}
+	}
+	return &search.SearchResult{Title: title, Author: author, Status: status, BookURL: bookURL, SiteName: s.Name()}, nil
+}
+
+// parseBookTitle derives display metadata from a "书名_作者【状态】" heading. The
+// trailing bracket is optional and the underscore separator may be absent, so
+// both book pages and search results reuse this single rule.
+func parseBookTitle(raw string) (title, author, status string) {
+	title = strings.TrimSpace(raw)
+	if start := strings.LastIndex(title, "【"); start > 0 && strings.HasSuffix(title, "】") {
+		status = strings.TrimSpace(strings.TrimSuffix(title[start+len("【"):], "】"))
+		title = strings.TrimSpace(title[:start])
+	}
+	if split := strings.LastIndex(title, "_"); split > 0 {
+		author, title = strings.TrimSpace(title[split+1:]), strings.TrimSpace(title[:split])
+	}
+	return title, author, status
+}
+
 // GetBookMeta implements search.BookMetaProvider.
 func (s *Site52Shuku) GetBookMeta(ctx context.Context, bookURL string) (*search.BookMetaDetail, error) {
 	doc, err := s.doGet(ctx, bookURL)
@@ -303,25 +436,7 @@ func (s *Site52Shuku) GetBookMeta(ctx context.Context, bookURL string) (*search.
 	}
 
 	detail := &search.BookMetaDetail{}
-
-	// Parse title line: <h1 class="article-title">书名_作者【状态】</h1>
-	titleText := strings.TrimSpace(doc.Find("h1.article-title").First().Text())
-	if titleText != "" {
-		// Pattern: "书名_作者【完结】" or "书名_作者"
-		if idx := strings.LastIndex(titleText, "【"); idx > 0 {
-			endIdx := strings.LastIndex(titleText, "】")
-			if endIdx > idx {
-				detail.Status = titleText[idx+len("【") : endIdx]
-			}
-			titleText = titleText[:idx]
-		}
-		// Split by last underscore to get author
-		if idx := strings.LastIndex(titleText, "_"); idx > 0 {
-			detail.Protagonist = "" // will try to detect from description
-			_ = titleText[:idx]     // title part before author
-			_ = titleText[idx+1:]   // author part
-		}
-	}
+	_, _, detail.Status = parseBookTitle(strings.TrimSpace(doc.Find("h1.article-title").First().Text()))
 
 	// Parse description from <article class="article-content">
 	articleContent := doc.Find("article.article-content")
@@ -333,20 +448,26 @@ func (s *Site52Shuku) GetBookMeta(ctx context.Context, bookURL string) (*search.
 		descText = rx(`\[.*?\]`).ReplaceAllString(descText, "")
 		// Remove "《书名》作者：XX【状态】" prefix
 		descText = rx(`《.*?》作者：[^【]*【.*?】`).ReplaceAllString(descText, "")
-		// Trim full-width spaces first, then strip "简介：" prefix
+		// Trim full-width spaces first, then strip the synopsis label.
 		descText = strings.Trim(descText, "\u3000 \t\n\r")
-		descText = strings.TrimSpace(strings.TrimPrefix(descText, "简介："))
-		descText = strings.TrimSpace(strings.TrimPrefix(descText, "简介:"))
+		for _, prefix := range []string{"简介：", "简介:", "文案：", "文案:"} {
+			descText = strings.TrimSpace(strings.TrimPrefix(descText, prefix))
+		}
 		detail.Description = strings.TrimSpace(descText)
 
 		// Try to detect protagonist from description
 		detail.Protagonist = detectProtagonist(detail.Description)
 	}
 
-	// Parse tags from "所属专题" section only
+	// Parse tags from "所属专题" only. That line links the author page first and
+	// the genre tags after it, so only genre links become subjects.
 	articleContent.Find("p").Each(func(_ int, sel *goquery.Selection) {
 		if strings.Contains(sel.Text(), "所属专题") {
 			sel.Find("a").Each(func(_ int, aSel *goquery.Selection) {
+				href, _ := aSel.Attr("href")
+				if !strings.Contains(href, "/Tags_Nan/") {
+					return
+				}
 				tagText := strings.TrimSpace(aSel.Text())
 				if tagText != "" {
 					detail.Tags = append(detail.Tags, tagText)

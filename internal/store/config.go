@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,19 +12,25 @@ import (
 
 // Config holds user configuration.
 type Config struct {
-	OutputDir   string       `yaml:"output_dir"`
-	Format      string       `yaml:"format"`      // "txt" or "epub"
-	Concurrency int          `yaml:"concurrency"` // parallel chapter downloads
-	RateLimit   float64      `yaml:"rate_limit"`  // requests/sec per site
-	RetryCount  int          `yaml:"retry_count"`
-	Yamibo      YamiboConfig `yaml:"yamibo"`
+	OutputDir   string        `yaml:"output_dir" json:"output_dir"`
+	Format      string        `yaml:"format" json:"format"`
+	Concurrency int           `yaml:"concurrency" json:"concurrency"`
+	RateLimit   float64       `yaml:"rate_limit" json:"rate_limit"`
+	RetryCount  int           `yaml:"retry_count" json:"retry_count"`
+	Yamibo      YamiboConfig  `yaml:"yamibo" json:"yamibo"`
+	Startup     StartupConfig `yaml:"startup" json:"startup"`
+}
+
+type StartupConfig struct {
+	Animation     string `yaml:"animation" json:"animation"` // sweep, static, or off
+	ReducedMotion bool   `yaml:"reduced_motion" json:"reduced_motion"`
 }
 
 type YamiboConfig struct {
-	MaxConcurrency int     `yaml:"max_concurrency"`
-	RateLimit      float64 `yaml:"rate_limit"`
-	MaxScanPages   int     `yaml:"max_scan_pages"`
-	MinPostChars   int     `yaml:"min_post_chars"`
+	MaxConcurrency int     `yaml:"max_concurrency" json:"max_concurrency"`
+	RateLimit      float64 `yaml:"rate_limit" json:"rate_limit"`
+	MaxScanPages   int     `yaml:"max_scan_pages" json:"max_scan_pages"`
+	MinPostChars   int     `yaml:"min_post_chars" json:"min_post_chars"`
 }
 
 // DefaultConfig returns sensible defaults.
@@ -34,6 +41,7 @@ func DefaultConfig() Config {
 		Concurrency: 8,
 		RateLimit:   2.0,
 		RetryCount:  3,
+		Startup:     StartupConfig{Animation: "sweep"},
 		Yamibo: YamiboConfig{
 			MaxConcurrency: 2,
 			RateLimit:      1.2,
@@ -85,25 +93,30 @@ func LoadConfig(path string) (Config, error) {
 
 func (cfg Config) Validate() error {
 	if strings.TrimSpace(cfg.OutputDir) == "" {
-		return fmt.Errorf("output_dir 不能为空")
+		return fmt.Errorf("output_dir must not be empty")
 	}
 	if cfg.Format != "txt" && cfg.Format != "epub" {
-		return fmt.Errorf("format 必须是 txt 或 epub")
+		return fmt.Errorf("format must be txt or epub")
 	}
-	if cfg.Concurrency <= 0 || cfg.RateLimit <= 0 || cfg.RetryCount < 0 {
-		return fmt.Errorf("concurrency、rate_limit 必须大于 0，retry_count 不能为负数")
+	if cfg.Concurrency <= 0 || cfg.Concurrency > 64 || cfg.RateLimit <= 0 || cfg.RateLimit > 20 || math.IsNaN(cfg.RateLimit) || math.IsInf(cfg.RateLimit, 0) || cfg.RetryCount < 0 || cfg.RetryCount > 10 {
+		return fmt.Errorf("concurrency must be 1..64, rate_limit must be >0 and <=20, retry_count must be 0..10")
 	}
 	if cfg.Yamibo.MaxConcurrency < 1 || cfg.Yamibo.MaxConcurrency > 2 {
-		return fmt.Errorf("yamibo.max_concurrency 必须在 1 到 2 之间")
+		return fmt.Errorf("yamibo.max_concurrency must be 1..2")
 	}
-	if cfg.Yamibo.RateLimit <= 0 || cfg.Yamibo.RateLimit > 1.2 {
-		return fmt.Errorf("yamibo.rate_limit 必须大于 0 且不超过 1.2")
+	if cfg.Yamibo.RateLimit <= 0 || cfg.Yamibo.RateLimit > 1.2 || math.IsNaN(cfg.Yamibo.RateLimit) || math.IsInf(cfg.Yamibo.RateLimit, 0) {
+		return fmt.Errorf("yamibo.rate_limit must be >0 and <=1.2")
 	}
 	if cfg.Yamibo.MaxScanPages <= 0 {
-		return fmt.Errorf("yamibo.max_scan_pages 必须大于 0")
+		return fmt.Errorf("yamibo.max_scan_pages must be positive")
 	}
 	if cfg.Yamibo.MinPostChars < 20 {
-		return fmt.Errorf("yamibo.min_post_chars 不能小于 20")
+		return fmt.Errorf("yamibo.min_post_chars must be at least 20")
+	}
+	switch cfg.Startup.Animation {
+	case "", "sweep", "static", "off":
+	default:
+		return fmt.Errorf("startup.animation must be sweep, static, or off")
 	}
 	return nil
 }
