@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -19,6 +20,10 @@ import (
 )
 
 const yamiboLoginPath = "member.php?mod=logging&action=login"
+
+// yamiboHeadlessLoginWait bounds the hidden browser attempt. A JavaScript
+// challenge finishes well within it; needing longer means a human is required.
+const yamiboHeadlessLoginWait = 25 * time.Second
 
 var yamiboFormhash = regexp.MustCompile(`(?i)name=["']formhash["'][^>]*value=["']([a-zA-Z0-9]+)["']`)
 
@@ -116,10 +121,7 @@ func (y *Yamibo) Login(ctx context.Context, username, password string) error {
 	err := y.nativeLogin(ctx, client, username, password)
 	var browser *yamiboBrowser
 	if errors.Is(err, errYamiboWAF) {
-		browser, err = newYamiboBrowser(ctx, y.browserHeadless)
-		if err == nil {
-			err = browser.login(ctx, y.baseURL, username, password)
-		}
+		browser, err = y.browserLogin(ctx, username, password)
 	}
 	if err != nil {
 		if browser != nil {
@@ -139,6 +141,44 @@ func (y *Yamibo) Login(ctx context.Context, username, password string) error {
 	y.authenticated = true
 	y.mu.Unlock()
 	return nil
+}
+
+// browserLogin tries a hidden browser first, because a JavaScript challenge
+// needs no human and a window must not interrupt every search. Only when the
+// hidden attempt cannot finish does a visible window appear for verification.
+func (y *Yamibo) browserLogin(ctx context.Context, username, password string) (*yamiboBrowser, error) {
+	if !y.browserHeadless && !yamiboVisibleBrowserForced() {
+		headCtx, cancel := context.WithTimeout(ctx, yamiboHeadlessLoginWait)
+		browser, err := newYamiboBrowser(headCtx, true)
+		if err == nil {
+			err = browser.login(headCtx, y.baseURL, username, password)
+		}
+		cancel()
+		if err == nil {
+			return browser, nil
+		}
+		if browser != nil {
+			browser.close()
+		}
+		if ctx.Err() != nil {
+			return nil, err
+		}
+	}
+	browser, err := newYamiboBrowser(ctx, y.browserHeadless)
+	if err == nil {
+		err = browser.login(ctx, y.baseURL, username, password)
+	}
+	return browser, err
+}
+
+// yamiboVisibleBrowserForced lets a user skip the hidden attempt when the site
+// insists on interactive verification for every login.
+func yamiboVisibleBrowserForced() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("YURISCRAPER_YAMIBO_VISIBLE"))) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
 }
 
 func (y *Yamibo) nativeLogin(ctx context.Context, client *http.Client, username, password string) error {

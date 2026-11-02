@@ -254,11 +254,8 @@ func (m *Model) selectSource(cmds *[]tea.Cmd) bool {
 	m.searching = false
 	adapter := m.sources[m.sourceCursor]
 	m.selectedSite = adapter.Name()
-	m.searchScopes = nil
+	m.searchScopes = searchScopes(adapter)
 	m.scopeCursor = 0
-	if scoped, ok := adapter.(search.ScopedSearcher); ok {
-		m.searchScopes = scoped.SearchScopes()
-	}
 	m.results = nil
 	m.allResults = nil
 	m.cursor = 0

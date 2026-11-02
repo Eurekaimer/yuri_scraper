@@ -103,6 +103,7 @@ func NewModel(service *app.Service, version string) *Model {
 	m := &Model{section: SecResults, startupNext: SecResults, input: ti, auth: newAuthForm(), authorInput: author, maxPagesInput: pages, minCharsInput: chars, service: service, engine: service.Search, sources: service.Search.Registry().All(), ctx: ctx, cancel: cancel, version: version, preview: true}
 	if len(m.sources) > 0 {
 		m.selectedSite = m.sources[0].Name()
+		m.searchScopes = searchScopes(m.sources[0])
 	}
 	m.SetChapterPlanDefaults(search.ChapterPlanOptions{MaxScanPages: service.Config.Yamibo.MaxScanPages, MinPostChars: service.Config.Yamibo.MinPostChars})
 	if service.Config.Startup.Animation != "off" && !service.Config.Startup.ReducedMotion && os.Getenv("TERM") != "dumb" && os.Getenv("NO_COLOR") == "" {
@@ -112,6 +113,14 @@ func NewModel(service *app.Service, version string) *Model {
 }
 
 func (m *Model) ShowLibrary() { m.section = SecLibrary; m.startupNext = SecLibrary }
+
+// searchScopes returns the sections a source exposes for scoped searching.
+func searchScopes(adapter search.SiteAdapter) []search.SearchScope {
+	if scoped, ok := adapter.(search.ScopedSearcher); ok {
+		return scoped.SearchScopes()
+	}
+	return nil
+}
 
 func (m *Model) SetChapterPlanDefaults(options search.ChapterPlanOptions) {
 	if options.MaxScanPages <= 0 {

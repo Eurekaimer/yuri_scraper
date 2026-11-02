@@ -51,8 +51,10 @@ type yamiboBrowser struct {
 	closed    atomic.Bool
 	closeOnce sync.Once
 
-	slots chan struct{}
-	done  chan struct{}
+	poolMu sync.Mutex
+	idle   []*yamiboBrowserTab
+	slots  chan struct{}
+	done   chan struct{}
 }
 
 // yamiboBrowserTab is one background tab of the browser context. Only the
@@ -193,6 +195,9 @@ func (b *yamiboBrowser) close() {
 		close(b.done)
 		// Cancelling the session context closes the login tab and every page
 		// tab that is still open.
+		b.poolMu.Lock()
+		b.idle = nil
+		b.poolMu.Unlock()
 		if b.tabCancel != nil {
 			// This also disposes the incognito BrowserContext.
 			b.tabCancel()
@@ -336,8 +341,7 @@ func (b *yamiboBrowser) document(ctx context.Context, baseURL, rawURL string, li
 	}
 
 	// Login owns the whole browser while it runs. Page requests only take the
-	// shared side of the lock, so different chapters can load at the same
-	// time, each on its own tab.
+	// shared side of the lock, so different chapters can load at the same time.
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if b.closed.Load() {
@@ -346,124 +350,138 @@ func (b *yamiboBrowser) document(ctx context.Context, baseURL, rawURL string, li
 
 	waitCtx, cancelWait := b.operationContext(ctx, yamiboBrowserPageWait)
 	defer cancelWait()
+	// Waiting for the site's rate budget must not hold a tab.
 	if limiter != nil {
 		if err := limiter.Wait(waitCtx); err != nil {
 			return nil, b.documentError(ctx, waitCtx, err)
 		}
 	}
 
-	tab, err := b.leaseTab(waitCtx)
+	tab, err := b.leaseFetcher(waitCtx, baseURL)
 	if err != nil {
 		return nil, b.documentError(ctx, waitCtx, err)
 	}
-	// A tab whose target died (crash, closed window) cannot be reused.
-	tabBroken := false
+	reusable := false
 	defer func() {
-		if tabBroken {
-			b.dropTab(tab)
+		if reusable {
+			b.releaseFetcher(tab)
 			return
 		}
-		b.releaseTab(tab)
+		b.dropFetcher(tab)
 	}()
 
-	pageCtx, cancel := yamiboBrowserLinkContext(tab.ctx, waitCtx)
-	defer cancel()
-
-	response, err := chromedp.Run(pageCtx, chromedp.NavigateResponse(rawURL))
+	result, err := b.fetch(waitCtx, tab, rawURL)
 	if err != nil {
-		// A canceled navigation can leave the renderer loading a request that
-		// will never finish. Abort it so the tab stays usable; the shared
-		// renderer process would otherwise stall later same-origin pages.
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			b.stopTab(tab)
-		} else {
-			tabBroken = true
-		}
-		return nil, b.documentError(ctx, pageCtx, err)
+		return nil, b.documentError(ctx, waitCtx, err)
 	}
-	status := http.StatusOK
-	headers := http.Header{}
-	if response != nil {
-		status = int(response.Status)
-		headers = yamiboNetworkHeaders(response.Headers)
-		if response.URL != "" && !sameYamiboOrigin(baseURL, response.URL) {
-			return nil, yamiboBrowserError(
-				"百合会页面跳转到了其他网站",
-				"为防止账号信息泄露，请求已停止；请稍后重试或联系网站管理员。",
-				nil,
-			)
-		}
-	}
-
-	body, err := b.pageHTML(pageCtx)
-	if err != nil {
-		tabBroken = true
-		return nil, b.documentError(ctx, pageCtx, err)
-	}
-	if location, locErr := chromedp.Run(pageCtx, chromedp.Location()); locErr == nil && !sameYamiboOrigin(baseURL, location) {
+	if !sameYamiboOrigin(baseURL, result.URL) {
 		return nil, yamiboBrowserError(
 			"百合会页面跳转到了其他网站",
 			"为防止账号信息泄露，请求已停止；请稍后重试或联系网站管理员。",
 			nil,
 		)
 	}
-
-	clearedChallenge := false
-	if isYamiboWAF(status, headers, body) {
-		// A verification challenge can need a human. Bring the background tab
-		// that hit it to the front of the shared window.
-		b.revealTab(pageCtx)
-		original := string(body)
-		deadline := time.Now().Add(yamiboBrowserWAFWait)
-		for {
-			if err := sleepYamiboBrowser(pageCtx, yamiboBrowserPoll); err != nil {
-				return nil, b.documentError(ctx, pageCtx, err)
-			}
-			current, htmlErr := b.pageHTML(pageCtx)
-			if htmlErr == nil {
-				body = current
-				if !isYamiboWAF(http.StatusOK, nil, body) &&
-					(string(body) != original || status == http.StatusOK) {
-					clearedChallenge = true
-					break
-				}
-			}
-			if time.Now().After(deadline) {
-				return nil, yamiboBrowserError(
-					"百合会的网站安全验证拦截了页面请求",
-					"请在打开的浏览器窗口完成验证后重试；如仍被拦截，请稍后重试或联系网站管理员。",
-					nil,
-				)
-			}
+	headers := http.Header{}
+	if result.RetryAfter != "" {
+		headers.Set("Retry-After", result.RetryAfter)
+	}
+	if isYamiboWAF(result.Status, headers, []byte(result.Body)) {
+		// A challenge can need a human. Load the page for real, let the user
+		// finish verification, then read the result with one more fetch.
+		if err := b.solveChallenge(waitCtx, tab, rawURL, baseURL); err != nil {
+			return nil, err
+		}
+		result, err = b.fetch(waitCtx, tab, rawURL)
+		if err != nil {
+			return nil, b.documentError(ctx, waitCtx, err)
+		}
+		if isYamiboWAF(result.Status, headers, []byte(result.Body)) {
+			return nil, yamiboBrowserError(
+				"百合会的网站安全验证拦截了页面请求",
+				"请在打开的浏览器窗口完成验证后重试；如仍被拦截，请稍后重试或联系网站管理员。",
+				nil,
+			)
 		}
 	}
-
-	if !clearedChallenge && (status < 200 || status >= 300) {
-		return nil, yamiboStatusError(status, headers)
+	if result.Status < 200 || result.Status >= 300 {
+		return nil, yamiboStatusError(result.Status, headers)
 	}
-	if len(body) == 0 {
+	if len(result.Body) == 0 {
 		return nil, yamiboBrowserError(
 			"百合会页面内容为空",
 			"请稍后重试，或重新登录后再试。",
 			nil,
 		)
 	}
-	if clearedChallenge {
-		if location, locErr := chromedp.Run(pageCtx, chromedp.Location()); locErr == nil && !sameYamiboOrigin(baseURL, location) {
-			return nil, yamiboBrowserError(
-				"百合会页面跳转到了其他网站",
-				"为防止账号信息泄露，请求已停止；请稍后重试或联系网站管理员。",
+	reusable = true
+	return []byte(result.Body), nil
+}
+
+// yamiboFetchResult is what the fetcher page reports for one page request.
+type yamiboFetchResult struct {
+	Status     int    `json:"status"`
+	URL        string `json:"url"`
+	RetryAfter string `json:"retryAfter"`
+	Body       string `json:"body"`
+}
+
+// fetch reads one page with the page's own fetch API. It is much faster than a
+// full navigation and keeps the authenticated cookies of the shared context.
+func (b *yamiboBrowser) fetch(ctx context.Context, tab *yamiboBrowserTab, rawURL string) (yamiboFetchResult, error) {
+	encoded, err := json.Marshal(rawURL)
+	if err != nil {
+		return yamiboFetchResult{}, err
+	}
+	pageCtx, cancel := yamiboBrowserLinkContext(tab.ctx, ctx)
+	defer cancel()
+	return chromedp.Run(pageCtx, chromedp.Evaluate[yamiboFetchResult](`(async () => {
+		const res = await fetch(`+string(encoded)+`, {credentials: "include", redirect: "follow"});
+		const body = await res.text();
+		return {status: res.status, url: res.url, retryAfter: res.headers.get("retry-after") || "", body};
+	})()`, chromedp.EvalAwaitPromise))
+}
+
+// solveChallenge loads a blocked page in the tab and waits for the site's
+// script or the user to finish verification.
+func (b *yamiboBrowser) solveChallenge(ctx context.Context, tab *yamiboBrowserTab, rawURL, baseURL string) error {
+	pageCtx, cancel := yamiboBrowserLinkContext(tab.ctx, ctx)
+	defer cancel()
+	b.revealTab(pageCtx)
+	if _, err := chromedp.Run(pageCtx, chromedp.NavigateResponse(rawURL)); err != nil {
+		return b.documentError(ctx, pageCtx, err)
+	}
+	deadline := time.Now().Add(yamiboBrowserWAFWait)
+	for {
+		body, err := b.pageHTML(pageCtx)
+		if err != nil {
+			return b.documentError(ctx, pageCtx, err)
+		}
+		if !isYamiboWAF(http.StatusOK, nil, body) {
+			if location, locErr := chromedp.Run(pageCtx, chromedp.Location()); locErr == nil && !sameYamiboOrigin(baseURL, location) {
+				return yamiboBrowserError(
+					"百合会页面跳转到了其他网站",
+					"为防止账号信息泄露，请求已停止；请稍后重试或联系网站管理员。",
+					nil,
+				)
+			}
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return yamiboBrowserError(
+				"百合会的网站安全验证拦截了页面请求",
+				"请在打开的浏览器窗口完成验证后重试；如仍被拦截，请稍后重试或联系网站管理员。",
 				nil,
 			)
 		}
+		if err := sleepYamiboBrowser(pageCtx, yamiboBrowserPoll); err != nil {
+			return b.documentError(ctx, pageCtx, err)
+		}
 	}
-	return body, nil
 }
 
-// leaseTab reserves one pool slot and creates a page tab in the shared
-// browser context. A tab serves exactly one page: Chrome throttles background
-// tabs, and a reused tab can then stop delivering load events.
-func (b *yamiboBrowser) leaseTab(ctx context.Context) (*yamiboBrowserTab, error) {
+// leaseFetcher reserves one pool slot and returns a tab already sitting on the
+// site origin, so later fetch calls are same-origin and authenticated.
+func (b *yamiboBrowser) leaseFetcher(ctx context.Context, baseURL string) (*yamiboBrowserTab, error) {
 	select {
 	case <-b.done:
 		return nil, yamiboBrowserError("百合会浏览器会话已关闭", "请重新输入账号密码登录。", nil)
@@ -479,39 +497,54 @@ func (b *yamiboBrowser) leaseTab(ctx context.Context) (*yamiboBrowserTab, error)
 		b.returnSlot()
 		return nil, yamiboBrowserError("浏览器窗口已关闭", "请重新输入账号密码登录。", err)
 	}
+	b.poolMu.Lock()
+	if n := len(b.idle); n > 0 {
+		tab := b.idle[n-1]
+		b.idle = b.idle[:n-1]
+		b.poolMu.Unlock()
+		if tab.ctx.Err() == nil {
+			return tab, nil
+		}
+		tab.cancel()
+		b.returnSlot()
+		return b.leaseFetcher(ctx, baseURL)
+	}
+	b.poolMu.Unlock()
+
 	// A child context inherits the browser context ID of the login tab, so the
 	// site sees the same authenticated incognito session without any cookie
-	// being copied. WithNewWindow(false) keeps these tabs in the existing
-	// window instead of creating one window per request.
+	// being copied.
 	tabCtx, tabCancel := chromedp.NewContext(b.tabCtx, chromedp.WithNewWindow(false))
-	return &yamiboBrowserTab{ctx: tabCtx, cancel: tabCancel}, nil
+	tab := &yamiboBrowserTab{ctx: tabCtx, cancel: tabCancel}
+	if _, err := chromedp.Run(tabCtx, chromedp.Navigate(baseURL)); err != nil {
+		tab.cancel()
+		b.returnSlot()
+		return nil, err
+	}
+	return tab, nil
 }
 
-func (b *yamiboBrowser) releaseTab(tab *yamiboBrowserTab) {
+func (b *yamiboBrowser) releaseFetcher(tab *yamiboBrowserTab) {
+	defer b.returnSlot()
+	if tab == nil || b.closed.Load() || tab.ctx.Err() != nil {
+		if tab != nil {
+			tab.cancel()
+		}
+		return
+	}
+	b.poolMu.Lock()
+	defer b.poolMu.Unlock()
+	if b.closed.Load() || len(b.idle) >= cap(b.slots) {
+		tab.cancel()
+		return
+	}
+	b.idle = append(b.idle, tab)
+}
+
+func (b *yamiboBrowser) dropFetcher(tab *yamiboBrowserTab) {
 	if tab != nil {
 		tab.cancel()
 	}
-	b.returnSlot()
-}
-
-// stopTab aborts a pending load on one tab so its renderer is not left waiting
-// for a request the caller already abandoned.
-func (b *yamiboBrowser) stopTab(tab *yamiboBrowserTab) {
-	if tab == nil || tab.ctx.Err() != nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(tab.ctx, 5*time.Second)
-	defer cancel()
-	_, _ = chromedp.Run(ctx, chromedp.Stop())
-}
-
-// dropTab closes a tab that failed in a way that may have killed its target,
-// and returns the pool slot without making the tab available again.
-func (b *yamiboBrowser) dropTab(tab *yamiboBrowserTab) {
-	if tab == nil {
-		return
-	}
-	tab.cancel()
 	b.returnSlot()
 }
 
@@ -519,9 +552,8 @@ func (b *yamiboBrowser) returnSlot() {
 	b.slots <- struct{}{}
 }
 
-// revealTab brings a pooled tab to the front so the user can finish an
-// interactive verification. A failure only means the window could not be
-// focused; the page itself keeps working.
+// revealTab brings a fetched tab to the front so the user can finish an
+// interactive verification.
 func (b *yamiboBrowser) revealTab(ctx context.Context) {
 	info := chromedp.FromContext(ctx)
 	if info == nil || info.Target == nil {

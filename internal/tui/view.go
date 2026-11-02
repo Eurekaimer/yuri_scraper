@@ -122,6 +122,9 @@ func (m *Model) renderSearchWorkspace(w int) string {
 	if m.query != "" {
 		prompt = MutedStyle.Render("搜索 · " + truncate(clean(m.query), max(1, w-7)))
 	}
+	if len(m.searchScopes) > 0 && m.section != SecSearch {
+		prompt = edgeLine(prompt, MutedStyle.Render(m.activeSearchScopeName()+" · Ctrl+F 分区"), w-2)
+	}
 	if m.section == SecSearch {
 		label := "搜索 "
 		if m.filtering {
