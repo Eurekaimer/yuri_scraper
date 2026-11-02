@@ -175,6 +175,9 @@ func (m *Model) bookPreview(book search.SearchResult, w int) string {
 	if book.ChapterCount > 0 {
 		lines = append(lines, fmt.Sprintf("章节 · %d 章", book.ChapterCount))
 	}
+	if book.Replies > 0 || book.Views > 0 {
+		lines = append(lines, fmt.Sprintf("热度 · %d 回复 · %d 查看", book.Replies, book.Views))
+	}
 	lines = append(lines, "", HelpStyle.Render("Enter 下载 · p 章节规划"))
 	if book.Description != "" {
 		lines = append(lines, "", lipgloss.NewStyle().Width(w).Render(clean(book.Description)))
@@ -373,7 +376,7 @@ func (m *Model) renderStatusBar() string {
 			if m.canRetryTask() {
 				return StatusBarStyle.Render("r 重试 · Esc 返回 · ! 诊断")
 			}
-			return StatusBarStyle.Render("Esc 返回 · b 书库 · ! 诊断")
+			return StatusBarStyle.Render("Esc 返回 · / 搜索 · b 书库 · ! 诊断")
 		case SecLibrary:
 			return StatusBarStyle.Render("↑↓ 选择 · Enter 打开 · ? 帮助")
 		case SecSources:
@@ -390,10 +393,10 @@ func (m *Model) renderStatusBar() string {
 		return StatusBarStyle.Render("j/k 模式 · h/l 候选 · Tab 字段 · Enter 开始 · PgUp/PgDn 翻页")
 	case SecProgress:
 		if m.active() {
-			return StatusBarStyle.Render("a/d 调速 · 1/2/3/4/5 档位 · x 取消 · Esc 浏览 · b 书库")
+			return StatusBarStyle.Render("a/d 调速 · 1/2/3/4/5 档位 · x 取消 · Esc 浏览 · / 搜索")
 		}
 		if m.canRetryTask() {
-			return StatusBarStyle.Render("r 重试 · Esc 浏览 · b 书库 · ! 诊断")
+			return StatusBarStyle.Render("r 重试 · / 搜索 · Esc 浏览 · ! 诊断")
 		}
 		return StatusBarStyle.Render("Esc 浏览 · b 书库 · ! 诊断 · ? 帮助")
 	case SecLibrary:

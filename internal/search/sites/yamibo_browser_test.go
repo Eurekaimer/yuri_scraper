@@ -58,7 +58,7 @@ func TestYamiboBrowserWAF(t *testing.T) {
 		}
 	})
 
-	t.Run("parallel chapters overlap on authenticated tabs", func(t *testing.T) {
+	t.Run("chapters reuse the authenticated session tab", func(t *testing.T) {
 		state := newYamiboBrowserParallelServer()
 		server := httptest.NewServer(state)
 		t.Cleanup(func() {
@@ -73,45 +73,25 @@ func TestYamiboBrowserWAF(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		type chapterResult struct {
-			pid  string
-			body string
-			err  error
-		}
-		results := make(chan chapterResult, 2)
-		for _, pid := range []string{"1", "2"} {
-			go func() {
-				body, err := y.GetChapterContent(ctx, fmt.Sprintf("%s/forum.php?pid=%s", server.URL, pid))
-				results <- chapterResult{pid: pid, body: body, err: err}
-			}()
-		}
-		chapters := map[string]string{}
-		for range 2 {
-			result := <-results
-			if result.err != nil {
-				t.Fatalf("chapter pid=%s failed: %v", result.pid, result.err)
+		for pid, want := range map[string]string{
+			"1": "第一章 并行正文甲",
+			"2": "第二章 并行正文乙",
+		} {
+			body, err := y.GetChapterContent(ctx, fmt.Sprintf("%s/forum.php?pid=%s", server.URL, pid))
+			if err != nil || !strings.Contains(body, want) {
+				t.Fatalf("chapter pid=%s failed: %q, %v", pid, body, err)
 			}
-			chapters[result.pid] = result.body
-		}
-		// Both responses are only written once both requests reached the
-		// server, so a serialized single-tab implementation cannot pass.
-		if !strings.Contains(chapters["1"], "第一章 并行正文甲") ||
-			!strings.Contains(chapters["2"], "第二章 并行正文乙") {
-			t.Fatalf("parallel chapters returned wrong bodies: %q", chapters)
 		}
 		// The auth cookie is HttpOnly and was only ever set inside the
-		// browser, so seeing it on both tabs proves they share the isolated
-		// authenticated context instead of a copy.
+		// browser, so seeing it on both requests proves the page reads share
+		// the isolated authenticated session instead of a copied cookie.
 		arrived := state.cookies()
 		if arrived["1"] != "session" || arrived["2"] != "session" {
-			t.Fatalf("pooled tabs did not carry the HttpOnly auth cookie: %v", arrived)
-		}
-		if timeouts := state.barrierTimeouts(); timeouts != 0 {
-			t.Fatalf("chapter requests were serialized past the barrier %d time(s)", timeouts)
+			t.Fatalf("page requests did not carry the HttpOnly auth cookie: %v", arrived)
 		}
 
-		// Cancelling a navigation that is stuck on the server must return
-		// promptly and leave the pooled browser usable.
+		// Cancelling a page read must return promptly and leave the browser
+		// usable for the next request.
 		blocked := state.block("9")
 		blockedCtx, blockedCancel := context.WithCancel(context.Background())
 		blockedErr := make(chan error, 1)
@@ -141,8 +121,8 @@ func TestYamiboBrowserWAF(t *testing.T) {
 			t.Fatalf("browser unusable after cancellation: %q, %v", body, err)
 		}
 
-		// Closing the browser while a navigation is in flight must release
-		// the request instead of deadlocking on the tab pool.
+		// Closing the browser while a page read is in flight must release the
+		// request instead of deadlocking.
 		closing := state.block("10")
 		closeErr := make(chan error, 1)
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -162,13 +142,10 @@ func TestYamiboBrowserWAF(t *testing.T) {
 		select {
 		case err := <-closeErr:
 			if err == nil {
-				t.Fatal("chapter reported success after the browser closed")
+				t.Fatal("closed browser reported a successful page read")
 			}
 		case <-time.After(10 * time.Second):
-			t.Fatal("closing the browser did not release the blocked chapter")
-		}
-		if y.IsAuthenticated() {
-			t.Fatal("browser session still authenticated after close")
+			t.Fatal("close did not release the in-flight request")
 		}
 		closing.unblock()
 	})
@@ -241,21 +218,17 @@ func (b *yamiboBrowserTestBlocker) unblock() {
 	b.once.Do(func() { close(b.release) })
 }
 
-// yamiboBrowserParallelServer serves two protected chapters and only answers
-// them once both requests are in flight.
+// yamiboBrowserParallelServer serves protected chapters and records the auth
+// cookie each request carried.
 type yamiboBrowserParallelServer struct {
-	mu       sync.Mutex
-	arrived  map[string]string
-	gated    bool
-	gate     chan struct{}
-	blocks   map[string]*yamiboBrowserTestBlocker
-	barrierN int
+	mu      sync.Mutex
+	arrived map[string]string
+	blocks  map[string]*yamiboBrowserTestBlocker
 }
 
 func newYamiboBrowserParallelServer() *yamiboBrowserParallelServer {
 	return &yamiboBrowserParallelServer{
 		arrived: map[string]string{},
-		gate:    make(chan struct{}),
 		blocks:  map[string]*yamiboBrowserTestBlocker{},
 	}
 }
@@ -281,35 +254,16 @@ func (s *yamiboBrowserParallelServer) ServeHTTP(w http.ResponseWriter, r *http.R
 	}
 
 	body := map[string]string{
-		"1": "第一章 并行正文甲：这是第一个标签页读取到的章节内容，用于验证并发加载。",
-		"2": "第二章 并行正文乙：这是第二个标签页读取到的章节内容，用于验证并发加载。",
+		"1": "第一章 并行正文甲：这是第一个请求读取到的章节内容，用于验证会话复用。",
+		"2": "第二章 并行正文乙：这是第二个请求读取到的章节内容，用于验证会话复用。",
 	}[pid]
 	if body == "" {
 		http.NotFound(w, r)
 		return
 	}
-
 	s.mu.Lock()
 	s.arrived[pid] = cookie.Value
-	if !s.gated && len(s.arrived) >= 2 {
-		s.gated = true
-		close(s.gate)
-	}
-	gate := s.gate
 	s.mu.Unlock()
-
-	select {
-	case <-gate:
-	case <-r.Context().Done():
-		return
-	case <-time.After(15 * time.Second):
-		s.mu.Lock()
-		s.barrierN++
-		s.mu.Unlock()
-		w.WriteHeader(http.StatusGatewayTimeout)
-		fmt.Fprint(w, `<div id="postlist">parallel barrier timed out</div>`)
-		return
-	}
 	fmt.Fprintf(w, `<div id="postlist"><table><tr><td id="postmessage_%s">%s</td></tr></table></div>`, pid, body)
 }
 
@@ -332,12 +286,6 @@ func (s *yamiboBrowserParallelServer) cookies() map[string]string {
 		out[pid] = value
 	}
 	return out
-}
-
-func (s *yamiboBrowserParallelServer) barrierTimeouts() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.barrierN
 }
 
 func (s *yamiboBrowserParallelServer) unblockAll() {

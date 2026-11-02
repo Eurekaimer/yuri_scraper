@@ -48,25 +48,29 @@ func (y *Yamibo) SearchScoped(ctx context.Context, query string, scopeIDs []stri
 	var requestErrors []error
 	successfulRequests := 0
 
-	for _, order := range []string{"replies", "views"} {
-		for _, fid := range forums {
-			for _, variant := range variants {
-				before := len(hits)
-				for _, searchURL := range y.searchURLs(fid, order, variant) {
-					doc, err := y.document(ctx, searchURL)
-					if err != nil {
-						requestErrors = append(requestErrors, fmt.Errorf("%s/%s: %w", mapYamiboForum(fid), order, err))
-						continue
-					}
-					successfulRequests++
-					collectYamiboSearchResults(doc, hits, forums, fid, order, y.baseURL)
-					if len(hits) > before {
-						break
+	for _, fid := range forums {
+		for _, variant := range variants {
+			before := len(hits)
+			urls := y.searchURLs(fid, "replies", variant)
+			for index := 0; index < len(urls); index++ {
+				doc, err := y.document(ctx, urls[index])
+				if err != nil {
+					requestErrors = append(requestErrors, fmt.Errorf("%s: %w", mapYamiboForum(fid), err))
+					continue
+				}
+				successfulRequests++
+				collectYamiboSearchResults(doc, hits, forums, fid, "replies", y.baseURL)
+				if index == 0 {
+					// Discuz answers a search with a searchid; further pages and
+					// alternate orderings are plain GETs on that id, so the
+					// keyword is submitted only once per section and variant.
+					if id := yamiboSearchID(doc); id != "" {
+						urls = append(urls, y.searchIDURL(id, "views", 1))
 					}
 				}
-				if len(hits) > before {
-					break
-				}
+			}
+			if len(hits) > before {
+				break
 			}
 		}
 	}
@@ -92,6 +96,42 @@ func (y *Yamibo) SearchScoped(ctx context.Context, query string, scopeIDs []stri
 		results = results[:40]
 	}
 	return results, nil
+}
+
+// yamiboSearchIDPattern finds the id Discuz assigns to a finished search. The
+// results page repeats it in pagination and ordering links.
+var yamiboSearchIDPattern = regexp.MustCompile(`[?&;]searchid=(\d+)`)
+
+func yamiboSearchID(doc *goquery.Document) string {
+	if doc == nil {
+		return ""
+	}
+	var id string
+	doc.Find("a[href*='searchid=']").EachWithBreak(func(_ int, anchor *goquery.Selection) bool {
+		href, _ := anchor.Attr("href")
+		if match := yamiboSearchIDPattern.FindStringSubmatch(href); len(match) > 1 {
+			id = match[1]
+			return false
+		}
+		return true
+	})
+	return id
+}
+
+// searchIDURL walks a completed search: the same results in another order or
+// on a later page, without submitting the keyword again.
+func (y *Yamibo) searchIDURL(id, order string, page int) string {
+	values := url.Values{
+		"mod":          {"forum"},
+		"searchid":     {id},
+		"orderby":      {order},
+		"ascdesc":      {"desc"},
+		"searchsubmit": {"yes"},
+	}
+	if page > 1 {
+		values.Set("page", strconv.Itoa(page))
+	}
+	return resolveYamiboURL(y.baseURL, "search.php?"+values.Encode())
 }
 
 func (y *Yamibo) searchForumIDs(scopeIDs []string) []int {

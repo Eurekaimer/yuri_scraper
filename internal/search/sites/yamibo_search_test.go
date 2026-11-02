@@ -2,6 +2,7 @@ package sites
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -37,14 +38,32 @@ func TestCollectYamiboSearchResultsExtractsSectionStatsAndAuthor(t *testing.T) {
 	}
 }
 
-func TestYamiboSearchScopedUsesKeywordFallbackContractAndPopularity(t *testing.T) {
+func TestYamiboSearchScopedUsesKeywordThenSearchID(t *testing.T) {
 	fixture, err := os.ReadFile(filepath.Join("testdata", "yamibo_search_results.html"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Discuz repeats the assigned search id in pagination and ordering links.
+	page := strings.Replace(string(fixture), "</body>",
+		`<a href="search.php?mod=forum&searchid=3848&page=2">2</a></body>`, 1)
 	orders := make(map[string]int)
+	submissions := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if query.Get("searchid") != "" {
+			if query.Get("searchid") != "3848" || query.Get("orderby") != "views" {
+				http.Error(w, "unexpected reuse of the search id", http.StatusBadRequest)
+				return
+			}
+			if query.Get("srchtxt") != "" {
+				http.Error(w, "keyword was submitted again", http.StatusBadRequest)
+				return
+			}
+			orders["views"]++
+			_, _ = io.WriteString(w, page)
+			return
+		}
 		if query.Get("srchtxt") != "一周一次" || query.Get("kw") != "一周一次" {
 			http.Error(w, "missing keyword parameters", http.StatusBadRequest)
 			return
@@ -53,9 +72,9 @@ func TestYamiboSearchScopedUsesKeywordFallbackContractAndPopularity(t *testing.T
 			http.Error(w, "wrong forum: "+got, http.StatusBadRequest)
 			return
 		}
+		submissions++
 		orders[query.Get("orderby")]++
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(fixture)
+		_, _ = io.WriteString(w, page)
 	}))
 	defer server.Close()
 
@@ -67,8 +86,8 @@ func TestYamiboSearchScopedUsesKeywordFallbackContractAndPopularity(t *testing.T
 	if len(results) != 1 || results[0].Title != "一周一次" || results[0].Popularity <= 0 {
 		t.Fatalf("unexpected ranked results: %#v", results)
 	}
-	if orders["replies"] != 1 || orders["views"] != 1 {
-		t.Fatalf("search orders = %#v, want one request each", orders)
+	if submissions != 1 || orders["replies"] != 1 || orders["views"] != 1 {
+		t.Fatalf("submissions=%d orders=%#v, want one keyword submission and one id reuse", submissions, orders)
 	}
 	ranked := search.FuzzyRank("一周一次", results)
 	if ranked[0].Title != "一周一次" {

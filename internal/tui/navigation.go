@@ -234,6 +234,13 @@ func (m *Model) handleKey(msg tea.KeyMsg, cmds *[]tea.Cmd) bool {
 		if key == "r" && m.canRetryTask() {
 			return m.beginDownload(m.activeBook, m.activePlanOptions, cmds)
 		}
+		// A finished or failed task must not trap the keyboard: searching and
+		// browsing stay available from the task view.
+		if key == "/" || key == "i" {
+			*cmds = append(*cmds, m.setSection(SecResults))
+			m.editSearch(false, cmds)
+			return true
+		}
 		if key == "enter" {
 			*cmds = append(*cmds, m.setSection(SecResults))
 		}
