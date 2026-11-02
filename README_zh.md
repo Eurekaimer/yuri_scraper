@@ -21,9 +21,11 @@ YuriScraper 是 Go 编写的键盘流程序：Bubble Tea TUI 负责浏览，命�
 | 52书库 | 公开访问 | 搜索、元数据、章节下载 |
 | 百合会 | 账号密码 | 论坛搜索、目录/电梯识别、楼层正文下载 |
 
-百合会账号和密码在 TUI 内或终端提示符中输入。程序读取 Discuz 登录页
-`formhash`，建立只存在于内存中的会话，并立即清空输入框；账号、密码和会话
-Cookie 都不会写入 YAML、下载历史、解析 checkpoint、日志或 JSON 输出。
+百合会账号和密码在 TUI 内或终端提示符中输入。遇到网站安全验证时，程序会打开
+独立的 Chrome、Chromium 或 Edge 窗口；请在窗口中完成验证。搜索和下载会继续使用
+同一个浏览器会话。账号、密码和会话 Cookie 不会写入配置、历史或日志。
+下载优先使用帖子目录；没有可用目录时只提取楼主正文。作者楼层扫描受
+`max_scan_pages` 限制。
 
 ## 安装
 
@@ -64,7 +66,14 @@ yuri-scraper open 640b3c00578a003b                    # 系统默认阅读器
 yuri-scraper remove 640b3c00578a003b --yes             # 移入 .trash
 yuri-scraper config show --json
 yuri-scraper install --bin-dir ~/.local/bin --json
+yuri-scraper repair novels/*.epub --in-place --json    # 重建章节与目录
 ```
+
+`repair` 把 `Page N` 续页并回所属章节，用存活章节重建 `toc.ncx`/`nav.xhtml`，
+删除 52书库广告与导航行，并修复正文里的高置信错字和半角标点。`--in-place`
+原地覆盖原文件，原样保留 `FILE.epub.bak`（已存在的备份不会被覆盖）；不加该
+选项时输出 `FILE.repaired.epub`。下载管线现在导出时执行同样的合并与清理，
+新书不会再出现 `Page N` 目录项。
 
 来源名接受 `52shuku`/`52书库` 和 `yamibo`/`百合会`。`download` 可用
 `--title`、`--format`、`--concurrency`、`--rate-limit`、`--retry-count`
@@ -106,7 +115,7 @@ TUI 明确区分列表导航、普通文本输入和弹窗提示三种上下文�
 | 书库 | `Enter`/`o` 打开、`v` 定位文件、`d` 移入回收站、`r` 重新下载、`/` 筛选、`Tab` 预览 |
 | 搜索输入 | 直接输入、`Enter` 提交、`Esc` 保留草稿并返回 |
 | 论坛规划 | `1/2/3` 模式、`Tab` 切换字段、`h/l` 目录候选、`Enter` 开始 |
-| 任务 | `a`/`d` 减速/加速、`1/2/3` 直接选档、`x` 取消、`Esc` 浏览、`b` 书库 |
+| 任务 | `a`/`d` 减速/加速、`1`–`5` 直接选档、`x` 取消、`Esc` 浏览、`b` 书库 |
 | 视图 | `s` 来源、`b` 书库、`t` 任务 |
 
 下载期间可以继续浏览，状态栏在所有界面显示进度；从任务页返回会恢复原来的
@@ -145,8 +154,8 @@ startup:
   reduced_motion: false
 
 yamibo:
-  max_concurrency: 2
-  rate_limit: 1.2
+  max_concurrency: 12
+  rate_limit: 10
   max_scan_pages: 10
   min_post_chars: 80
 ```
@@ -157,11 +166,20 @@ yamibo:
 `config.yaml`、当前目录向上找到的项目根目录或该目录的 `config.yaml`；不像
 YuriScraper 配置的文件不会被静默采用。
 
-`concurrency` 与 `rate_limit` 就是实际生效的下载预算，只会被来源声明的上限
-压低。52书库在 64 并发 / 20 请求每秒的合理性上限内使用配置值，配置得更保守
-时不会被抬高；百合会额外限制为最多 2 个 worker、1.2 请求每秒。下载过程中按
-`1/2/3` 会用 Slow（2 worker，0.5 req/s）、Normal（8，2）、Fast（16，5）档
-替换启动预算，但仍受来源上限约束。每次尝试（含重试）都经过同一个令牌桶。
+启动时使用 `concurrency` 和 `rate_limit`，并受书源配置上限约束。下载过程中
+可用数字键选择速度档位，`a`/`d` 逐档调节：
+
+| 按键 | 档位 | 并发数 | 每秒请求数 |
+|---|---|---:|---:|
+| `1` | 慢速 | 2 | 0.5 |
+| `2` | 标准 | 8 | 2 |
+| `3` | 快速 | 16 | 5 |
+| `4` | 高速 | 24 | 8 |
+| `5` | 极速 | 32 | 12 |
+
+实际预算不超过来源配置；百合会最高 12 并发、每秒 10 次页面请求。百合会浏览器
+会话会复用登录状态并并行请求，不需要复制 Cookie。高速档可能触发网站限流或安全
+验证，遇到拦截时请降低档位或稍后重试；较低的 `yamibo` 配置始终优先生效。
 
 `startup.animation` 接受 `sweep`、`static`、`off`；`reduced_motion`、设置
 `NO_COLOR` 或 `TERM=dumb` 同样会关闭动画。

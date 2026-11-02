@@ -42,7 +42,9 @@ and receive credentials from the in-memory TUI form or the terminal prompt.
 | `internal/search/sites` | Site-specific HTTP and HTML parsing, source policies |
 | `internal/transport` | Bounded HTTP transport and retryable/permanent error classification |
 | `internal/scraper` | Worker scheduling, rate limiting, retries, checkpoints, export orchestration |
-| `internal/converter` | Chapter splitting, zh conversion, streamed TXT and EPUB output |
+| `internal/converter` | Chapter splitting, continuation-page merging, zh conversion, streamed TXT and EPUB output |
+| `internal/textclean` | Body-text normalization and 52shuku advertisement/navigation filtering |
+| `internal/repair` | Offline EPUB rebuild: spine reading, page merging, navigation regeneration |
 | `internal/store` | Configuration, atomic JSON history, library lock, path resolution |
 | `internal/buildinfo` | Version normalization and user-visible build identity |
 
@@ -88,9 +90,9 @@ type ScrapePolicyProvider interface {
 }
 ```
 
-52shuku supplies rich metadata. Yamibo reads the Discuz login formhash, submits
-the account/password form, retains only the resulting in-memory cookie jar, and
-maps forum threads/catalog links onto the shared book/chapter representation.
+52shuku supplies rich metadata. Yamibo reads and submits the Discuz login form.
+When a security challenge blocks native requests, an isolated browser session
+handles login and subsequent pages. Both paths feed the same forum parser.
 Its search queries literature/translation scopes using both reply and view
 ordering, merges threads by TID, and emits reply/view popularity signals. The
 shared search package owns query variants, CJK fuzzy relevance, and bounded
@@ -98,12 +100,12 @@ popularity weighting, so site adapters do not duplicate ranking.
 
 Yamibo additionally implements the optional `ChapterPlanner` protocol with two
 separate resolvers: a catalog resolver that extracts and scores independent DOM
-candidates with previews, and an author-post resolver that detects or accepts an
-author, discovers total pages, scans within a configured limit, and deduplicates
-ordered posts by PID. Paging state is persisted as a credential-free JSON
-checkpoint, and post bodies found while planning are streamed through a content
-sink into the normal chapter cache so the worker pool neither re-fetches them
-nor retains the whole book.
+candidates with previews, and an author-post resolver that uses the thread
+starter's filtered pages when available, subject to the configured page limit.
+Both deduplicate ordered posts by PID. Paging state is persisted as
+a credential-free JSON checkpoint. Post bodies stream through a content sink
+into the chapter cache, so workers neither re-fetch them nor retain the whole
+book in memory.
 
 ## Request budget
 
@@ -113,21 +115,17 @@ authoritative below it.
 | Source | Effective budget |
 |---|---|
 | 52shuku | configured `concurrency`/`rate_limit`, capped at 64 workers and 20 req/s |
-| Yamibo | configured values, capped at 2 workers and 1.2 req/s |
+| Yamibo | configured values, capped at 12 workers and 10 page requests/s |
 
-`transport.BoundedTransport` owns the request budget for a source: a slot is
-held until the response body closes, the token bucket covers redirect hops, and
-decoded bodies are bounded. A response larger than the cap is a permanent error
-rather than a silently truncated page.
+For 52shuku, `transport.BoundedTransport` holds a source slot until the response
+body closes, covers redirect hops and bounds decoded bodies. A response larger
+than the cap is a permanent error rather than a silently truncated page.
 
-A token bucket alone releases requests at perfectly even intervals, which is a
-detectable machine signature and offers no protection against a per-IP rate
-heuristic. The transport therefore also enforces a randomized minimum spacing
-between releases: consecutive requests are separated by at least the configured
-interval and at most 1.5x it. Spacing is derived from the interval itself, so it
-scales with any configured rate and applies to every source. It can only make a
-sequence slower than the configured budget, never faster, and it never delays
-the first request that the token bucket permits.
+The 52shuku transport adds randomized spacing between token releases. Yamibo
+instead uses its own shared page-request limiter and a pool of browser tabs
+sharing the isolated authenticated session; worker concurrency and the active
+speed tier further bound chapter downloads. Page resources loaded by Chrome are
+not counted as individual page navigations.
 
 Every attempt, including retries, waits on the same token bucket. Retry delays
 use exponential backoff capped at 30 seconds plus small deterministic jitter.
@@ -238,15 +236,28 @@ partial book only fetches missing chapters, and the worker pool never holds
 every chapter body at once.
 
 Export streams chapters in plan order through `converter.WriteTXTStream` or
-`converter.WriteEPUBStream`. Only navigation titles and filenames are retained
-until the EPUB package metadata is written, and each chapter is flushed so a
-failing destination stops the producer. Failed chapters appear in the output as
-explicit markers and in `<book>-<hash>.failed.json`; the cache and manifest are
-removed only after a fully successful export.
+`converter.WriteEPUBStream`. Page bodies pass through `textclean.CleanText`
+(drop site advertisement/navigation lines, normalize body text) and then
+`converter.MergePageContinuations`, which folds the synthetic `Page N` back into
+its chapter, so navigation lists real chapters only. Only navigation titles and
+filenames are retained until the EPUB package metadata is written, and each
+chapter is flushed so a failing destination stops the producer. Failed chapters
+appear in the output as explicit markers and in `<book>-<hash>.failed.json`; the
+cache and manifest are removed only after a fully successful export.
 
 Finished files and failure manifests use a source/book identity suffix, so two
 books with the same title cannot overwrite each other. Output, history, and
 checkpoints are written to a temporary file, synced, and renamed.
+
+`repair FILE.epub...` rebuilds an already exported book without network access:
+`internal/repair` reads `META-INF/container.xml` and the OPF spine (falling back
+to numeric `chapter_*.xhtml` order), feeds each chapter document through the
+same `textclean` and `converter.MergePageContinuations` pipeline, and lets
+`converter.WriteEPUBStream` regenerate `content.opf`, `toc.ncx` and `nav.xhtml`
+from the surviving chapters. Metadata is copied from the old package. The command
+never loads configuration and writes to a temporary file that replaces the
+target only on success; `--in-place` keeps the pre-repair bytes in
+`FILE.epub.bak`, created only when no backup exists.
 
 ## Command line contract
 

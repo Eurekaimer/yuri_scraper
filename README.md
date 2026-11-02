@@ -23,10 +23,12 @@ concurrency and rate limit authoritative for 52shuku.
 | 52shuku | Public | Search, metadata, chapter download |
 | Yamibo | Account/password | Forum search, catalog/elevator detection, post download |
 
-Yamibo credentials are entered inside the TUI or the credential prompt. The
-Discuz `formhash` login is read, an in-memory session is established, and the
-input fields are cleared. Accounts, passwords, and session cookies are never
-written to YAML, history, checkpoints, logs, or JSON output.
+Enter Yamibo credentials in the TUI or terminal prompt. If the site requires a
+security check, complete it in the separate Chrome, Chromium, or Edge window.
+Searches and downloads use that same browser session. Credentials and cookies
+are not written to configuration, history, or logs.
+Downloads prefer a detected catalog; without one, they scan the thread starter's
+posts, bounded by `max_scan_pages`.
 
 ## Install
 
@@ -69,7 +71,16 @@ yuri-scraper open 640b3c00578a003b                    # system default reader
 yuri-scraper remove 640b3c00578a003b --yes             # move file to .trash
 yuri-scraper config show --json
 yuri-scraper install --bin-dir ~/.local/bin --json
+yuri-scraper repair novels/*.epub --in-place --json    # rebuild chapters and TOC
 ```
+
+`repair` merges `Page N` continuation documents into the chapter they belong to,
+regenerates `toc.ncx`/`nav.xhtml` from the surviving chapters, drops 52shuku
+advertisement/navigation lines and fixes high-confidence typos and half-width
+punctuation in body text. `--in-place` overwrites each file and keeps the
+untouched original as `FILE.epub.bak` (an existing backup is never replaced);
+without it the result goes to `FILE.repaired.epub`. Downloads now apply the same
+merge and cleanup at export time, so new books no longer list `Page N` entries.
 
 Source names accept `52shuku`/`52书库` and `yamibo`/`百合会`. `download` accepts
 `--title`, `--format`, `--concurrency`, `--rate-limit`, and `--retry-count`
@@ -124,7 +135,7 @@ and modal prompts. Text input accepts `j/k/h/l/q/:` literally.
 | Library | `Enter`/`o` open, `v` reveal, `d` trash, `r` re-download, `/` filter, `Tab` preview |
 | Search input | type, `Enter` submit, `Esc` keep the draft and return |
 | Forum planning | `1/2/3` mode, `Tab` fields, `h/l` catalog candidate, `Enter` start |
-| Task | `a`/`d` slower/faster, `1/2/3` preset, `x` cancel, `Esc` browse, `b` library |
+| Task | `a`/`d` slower/faster, `1`–`5` presets, `x` cancel, `Esc` browse, `b` library |
 | Views | `s` sources, `b` library, `t` task |
 
 A download keeps running while you browse; the status bar shows progress on
@@ -145,8 +156,8 @@ startup:
   reduced_motion: false
 
 yamibo:
-  max_concurrency: 2
-  rate_limit: 1.2
+  max_concurrency: 12
+  rate_limit: 10
   max_scan_pages: 10
   min_post_chars: 80
 ```
@@ -159,14 +170,22 @@ beside the binary, then the project root or configuration file of the current
 directory are tried in that order; a `config.yaml` that does not look like a
 YuriScraper configuration is never adopted silently.
 
-`concurrency` and `rate_limit` are the effective download budget, capped by any
-source-declared policy. For 52shuku the configured values apply up to a sanity
-ceiling of 64 concurrent requests and 20 requests/second; lower values are
-preserved exactly. Yamibo additionally caps the budget at 2 workers and 1.2
-requests/second. During a download, `1/2/3` replaces the startup budget with a
-Slow (2 workers, 0.5 req/s), Normal (8, 2), or Fast (16, 5) profile, still
-subject to the source cap. Every attempt, including retries, passes the same
-token bucket.
+At startup, `concurrency` and `rate_limit` set the budget, subject to each
+source's configured limits. During a download use a numeric key or `a`/`d` to
+change speed:
+
+| Key | Profile | Workers | Requests/second |
+|---|---|---:|---:|
+| `1` | Slow | 2 | 0.5 |
+| `2` | Normal | 8 | 2 |
+| `3` | Fast | 16 | 5 |
+| `4` | Turbo | 24 | 8 |
+| `5` | Extreme | 32 | 12 |
+
+Source limits still apply. Yamibo allows up to 12 workers and 10 page requests
+per second; concurrent browser tabs share one authenticated session. High
+speeds can trigger rate limits or security challenges: lower the tier or retry
+later if blocked. Lower `yamibo` limits in your configuration remain binding.
 
 `startup.animation` accepts `sweep`, `static`, or `off`. `reduced_motion`, a
 `NO_COLOR` environment, or `TERM=dumb` disables motion as well.
