@@ -164,6 +164,151 @@ func TestConfiguredRateSurvivesScrapeStartup(t *testing.T) {
 	}
 }
 
+func TestSpeedProfilesStepThroughEveryPreset(t *testing.T) {
+	presets := []struct {
+		profile SpeedProfile
+		name    string
+		workers int64
+		rate    float64
+	}{
+		{SpeedSlow, "Slow", 2, 0.5},
+		{SpeedNormal, "Normal", 8, 2},
+		{SpeedFast, "Fast", 16, 5},
+		{SpeedTurbo, "Turbo", 24, 8},
+		{SpeedExtreme, "Extreme", 32, 12},
+	}
+	profiles := SpeedProfiles()
+	if len(profiles) != len(presets) {
+		t.Fatalf("got %d presets, want %d", len(profiles), len(presets))
+	}
+	for i, want := range presets {
+		got := profiles[i]
+		if got != want.profile || got.String() != want.name || got.concurrency() != want.workers || got.rateLimit() != want.rate {
+			t.Fatalf("preset %d = %v (%s, %d workers, %g rps), want %v (%s, %d workers, %g rps)", i, got, got.String(), got.concurrency(), got.rateLimit(), want.profile, want.name, want.workers, want.rate)
+		}
+		if i > 0 {
+			if slower, moved := got.Slower(); !moved || slower != profiles[i-1] {
+				t.Fatalf("%v stepped down to %v (moved=%t), want %v", got, slower, moved, profiles[i-1])
+			}
+		}
+		if i < len(presets)-1 {
+			if faster, moved := got.Faster(); !moved || faster != profiles[i+1] {
+				t.Fatalf("%v stepped up to %v (moved=%t), want %v", got, faster, moved, profiles[i+1])
+			}
+		}
+	}
+	if slower, moved := SpeedSlow.Slower(); moved || slower != SpeedSlow {
+		t.Fatalf("slowest preset stepped below the range: %v moved=%t", slower, moved)
+	}
+	if faster, moved := SpeedExtreme.Faster(); moved || faster != SpeedExtreme {
+		t.Fatalf("fastest preset stepped above the range: %v moved=%t", faster, moved)
+	}
+}
+
+func waitForActiveWorkers(t *testing.T, engine *Engine, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		engine.mu.Lock()
+		active := engine.activeWorkers
+		engine.mu.Unlock()
+		switch {
+		case active == want:
+			return
+		case active > want:
+			t.Fatalf("worker pool admitted %d workers, want at most %d", active, want)
+		case time.Now().After(deadline):
+			t.Fatalf("worker pool stuck at %d workers, want %d", active, want)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+func TestLiveSpeedChangeGrowsWorkerPool(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Concurrency = 1
+	engine := NewEngine(cfg)
+	release := make(chan struct{})
+	adapter := &testAdapter{chapters: testChapters(40), fetch: func(ctx context.Context, _ string) (string, error) {
+		select {
+		case <-release:
+			return "body", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	progress := startTestBook(t, engine, ctx, adapter, "https://example.test/grow")
+	waitForActiveWorkers(t, engine, 1)
+	time.Sleep(40 * time.Millisecond)
+	if workers, _ := engine.Budget(); workers != 1 {
+		t.Fatalf("configured startup budget changed without an explicit speed selection: %d workers", workers)
+	}
+	if active := func() int64 { engine.mu.Lock(); defer engine.mu.Unlock(); return engine.activeWorkers }(); active != 1 {
+		t.Fatalf("pool grew to %d workers before an explicit speed change", active)
+	}
+	engine.SetSpeed(SpeedExtreme)
+	if workers, rps := engine.Budget(); workers != 32 || rps != 12 {
+		t.Fatalf("extreme budget = %d workers / %g rps, want 32 / 12", workers, rps)
+	}
+	waitForActiveWorkers(t, engine, 32)
+	cancel()
+	final := terminalProgress(t, progress)
+	if final.Phase != "canceled" {
+		t.Fatalf("grown pool did not stop on cancellation: %+v", final)
+	}
+}
+
+func TestSpeedIncreaseWhileFinalChapterIsQueued(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Concurrency = 1
+	engine := NewEngine(cfg)
+	started := make(chan string, 2)
+	adapter := &testAdapter{chapters: testChapters(2), fetch: func(ctx context.Context, rawURL string) (string, error) {
+		started <- rawURL
+		<-ctx.Done()
+		return "", ctx.Err()
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	progress := startTestBook(t, engine, ctx, adapter, "https://example.test/two-pages")
+	receiveURL(t, started)
+	engine.SetSpeed(SpeedExtreme)
+	receiveURL(t, started)
+	cancel()
+	if final := terminalProgress(t, progress); final.Phase != "canceled" {
+		t.Fatalf("download did not cancel cleanly: %+v", final)
+	}
+}
+
+func TestSpeedGrowthStaysWithinSourceCaps(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.Concurrency = 1
+	engine := NewEngine(cfg)
+	release := make(chan struct{})
+	adapter := &testAdapter{chapters: testChapters(40), workers: 12, rate: 5, fetch: func(ctx context.Context, _ string) (string, error) {
+		select {
+		case <-release:
+			return "body", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	progress := startTestBook(t, engine, ctx, adapter, "https://example.test/capped-growth")
+	engine.SetSpeed(SpeedExtreme)
+	if workers, rps := engine.Budget(); workers != 12 || rps != 5 {
+		t.Fatalf("source caps were bypassed: %d workers / %g rps, want 12 / 5", workers, rps)
+	}
+	waitForActiveWorkers(t, engine, 12)
+	cancel()
+	if final := terminalProgress(t, progress); final.Phase != "canceled" {
+		t.Fatalf("capped pool did not stop on cancellation: %+v", final)
+	}
+}
+
 func TestEngineRejectsOverlapDuringPlanning(t *testing.T) {
 	engine := NewEngine(testConfig(t))
 	entered := make(chan struct{})

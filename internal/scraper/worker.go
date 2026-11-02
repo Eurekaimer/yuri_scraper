@@ -49,29 +49,7 @@ func (e *Engine) run(ctx context.Context, adapter search.SiteAdapter, meta searc
 	var workers sync.WaitGroup
 	for range workerCount {
 		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case job, ok := <-jobs:
-					if !ok {
-						return
-					}
-					if err := e.acquireWorker(ctx); err != nil {
-						return
-					}
-					result := e.fetchChapter(ctx, adapter, cacheDir, job)
-					e.releaseWorker()
-					select {
-					case results <- result:
-					case <-ctx.Done():
-						return
-					}
-				}
-			}
-		}()
+		go e.work(ctx, adapter, cacheDir, jobs, results, &workers)
 	}
 	go func() {
 		defer close(jobs)
@@ -149,6 +127,32 @@ func (e *Engine) run(ctx context.Context, adapter search.SiteAdapter, meta searc
 		}
 	}
 	publishProgress(progress, state)
+}
+
+// work pulls chapter jobs until the queue closes. Each in-flight request holds
+// one admission slot, so a raised budget admits the extra workers immediately.
+func (e *Engine) work(ctx context.Context, adapter search.SiteAdapter, cacheDir string, jobs <-chan chapterJob, results chan<- chapterResult, workers *sync.WaitGroup) {
+	defer workers.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job, ok := <-jobs:
+			if !ok {
+				return
+			}
+			if err := e.acquireWorker(ctx); err != nil {
+				return
+			}
+			result := e.fetchChapter(ctx, adapter, cacheDir, job)
+			e.releaseWorker()
+			select {
+			case results <- result:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
 }
 
 func (e *Engine) fetchChapter(ctx context.Context, adapter search.SiteAdapter, cacheDir string, job chapterJob) chapterResult {

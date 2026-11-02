@@ -21,6 +21,8 @@ const (
 	SpeedSlow SpeedProfile = iota
 	SpeedNormal
 	SpeedFast
+	SpeedTurbo
+	SpeedExtreme
 )
 
 func (sp SpeedProfile) concurrency() int64 {
@@ -29,6 +31,10 @@ func (sp SpeedProfile) concurrency() int64 {
 		return 2
 	case SpeedFast:
 		return 16
+	case SpeedTurbo:
+		return 24
+	case SpeedExtreme:
+		return 32
 	default:
 		return 8
 	}
@@ -39,6 +45,10 @@ func (sp SpeedProfile) rateLimit() float64 {
 		return 0.5
 	case SpeedFast:
 		return 5
+	case SpeedTurbo:
+		return 8
+	case SpeedExtreme:
+		return 12
 	default:
 		return 2
 	}
@@ -49,6 +59,10 @@ func (sp SpeedProfile) String() string {
 		return "Slow"
 	case SpeedFast:
 		return "Fast"
+	case SpeedTurbo:
+		return "Turbo"
+	case SpeedExtreme:
+		return "Extreme"
 	default:
 		return "Normal"
 	}
@@ -56,7 +70,9 @@ func (sp SpeedProfile) String() string {
 
 // SpeedProfiles lists the presets from slowest to fastest so interfaces can
 // move between them without hard-coding the order.
-func SpeedProfiles() []SpeedProfile { return []SpeedProfile{SpeedSlow, SpeedNormal, SpeedFast} }
+func SpeedProfiles() []SpeedProfile {
+	return []SpeedProfile{SpeedSlow, SpeedNormal, SpeedFast, SpeedTurbo, SpeedExtreme}
+}
 
 // Slower returns the next lower preset, reporting false at the slowest one.
 func (sp SpeedProfile) Slower() (SpeedProfile, bool) {
@@ -68,8 +84,8 @@ func (sp SpeedProfile) Slower() (SpeedProfile, bool) {
 
 // Faster returns the next higher preset, reporting false at the fastest one.
 func (sp SpeedProfile) Faster() (SpeedProfile, bool) {
-	if sp >= SpeedFast {
-		return SpeedFast, false
+	if sp >= SpeedExtreme {
+		return SpeedExtreme, false
 	}
 	return sp + 1, true
 }
@@ -162,7 +178,7 @@ func NewEngine(cfg Config) *Engine {
 func (e *Engine) SetSpeed(sp SpeedProfile) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if sp < SpeedSlow || sp > SpeedFast {
+	if sp < SpeedSlow || sp > SpeedExtreme {
 		sp = SpeedNormal
 	}
 	e.profile = sp
@@ -258,7 +274,7 @@ func (e *Engine) ScrapeBookWithOptions(ctx context.Context, adapter search.SiteA
 		}
 	}
 	e.applyPolicyLocked()
-	workerCount := min(e.maxWorkers, max(e.requestedWorkers, SpeedFast.concurrency()))
+	workerCount := min(e.maxWorkers, max(e.requestedWorkers, SpeedExtreme.concurrency()))
 	e.mu.Unlock()
 	meta.BookURL, meta.SiteName = bookURL, adapter.Name()
 	cacheRoot := filepath.Join(e.cfg.OutputDir, ".cache")
