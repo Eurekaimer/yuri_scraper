@@ -16,6 +16,7 @@ import (
 
 	"github.com/Eurekaimer/yuri_scraper/internal/converter"
 	"github.com/Eurekaimer/yuri_scraper/internal/search"
+	"github.com/Eurekaimer/yuri_scraper/internal/textclean"
 )
 
 func (e *Engine) writeOutput(ctx context.Context, adapter search.SiteAdapter, meta search.SearchResult, chapters []search.Chapter, paths []string, failed []FailedChapter) (string, error) {
@@ -62,7 +63,7 @@ func (e *Engine) writeOutput(ctx context.Context, adapter search.SiteAdapter, me
 			if err != nil {
 				return fmt.Errorf("read chapter checkpoint: %w", err)
 			}
-			actual := converter.SplitChapters(string(data), index)
+			actual := converter.SplitChapters(textclean.CleanText(string(data)), index)
 			for _, chapter := range actual {
 				if err := ctx.Err(); err != nil {
 					return err
@@ -85,10 +86,11 @@ func (e *Engine) writeOutput(ctx context.Context, adapter search.SiteAdapter, me
 	}
 	defer os.Remove(tmp.Name())
 	writer := contextWriter{context: ctx, writer: tmp}
+	merged := converter.MergePageContinuations(source)
 	if e.cfg.Format == "epub" {
-		err = converter.WriteEPUBStream(writer, bookMeta, source)
+		err = converter.WriteEPUBStream(writer, bookMeta, merged)
 	} else {
-		err = converter.WriteTXTStream(writer, source)
+		err = converter.WriteTXTStream(writer, merged)
 	}
 	if err == nil {
 		err = tmp.Sync()

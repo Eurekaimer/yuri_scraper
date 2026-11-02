@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/Eurekaimer/yuri_scraper/internal/app"
+	"github.com/Eurekaimer/yuri_scraper/internal/converter"
 	"github.com/Eurekaimer/yuri_scraper/internal/store"
 )
 
@@ -26,7 +27,7 @@ func TestHelpAndVersionBypassConfiguration(t *testing.T) {
 		{"--help"}, {"--version"}, {"-version"}, {"version"},
 		{"version", "--help"}, {"tui", "--help"}, {"search", "--help"},
 		{"download", "--help"}, {"library", "remove", "--help"},
-		{"config", "--help"}, {"install", "--help"},
+		{"config", "--help"}, {"install", "--help"}, {"repair", "--help"},
 	} {
 		t.Run(strings.Join(arguments, " "), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -55,6 +56,7 @@ func TestInvalidCommandsFailBeforeApplicationInitialization(t *testing.T) {
 		{"search", "query", "--source", "unknown"}, {"config", "change"},
 		{"remove", "id"}, {"library", "forget", "id"}, {"library", "unknown"},
 		{"search", "query", "--concurrency", "2"},
+		{"repair"}, {"repair", "x.txt"},
 	} {
 		t.Run(strings.Join(arguments, " "), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -187,5 +189,68 @@ func TestMissingSelectedConfigDoesNotCreateAnotherLibrary(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "moved")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("created replacement library: %v", err)
+	}
+}
+
+func TestRepairInPlaceKeepsBackupAndMergesPages(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "book.epub")
+	source := converter.ChapterSource(func(yield func(converter.Chapter) error) error {
+		for _, chapter := range []converter.Chapter{
+			{Title: "第1章", Content: "正文一。"},
+			{Title: "Page 2", Content: "续文。"},
+			{Title: "第2章", Content: "正文二。"},
+		} {
+			if err := yield(chapter); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	var original bytes.Buffer
+	if err := converter.WriteEPUBStream(&original, converter.BookMeta{Title: "书", Author: "作者"}, source); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, original.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := Run(context.Background(), []string{"repair", path, "--in-place", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit code %d: %s", code, &stderr)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected diagnostic: %s", &stderr)
+	}
+	var results []repairResult
+	if err := json.Unmarshal(stdout.Bytes(), &results); err != nil {
+		t.Fatalf("invalid JSON result: %v (%s)", err, &stdout)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %#v; want one entry", results)
+	}
+	result := results[0]
+	if result.Input != path || result.Output != path || result.Backup != path+".bak" {
+		t.Fatalf("unexpected paths: %#v", result)
+	}
+	if result.Chapters != 2 || result.MergedPages != 1 {
+		t.Fatalf("stats = %#v; want 2 chapters and 1 merged page", result.Stats)
+	}
+	backup, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(backup, original.Bytes()) {
+		t.Fatal("backup does not hold the pre-repair file")
+	}
+	repaired, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(repaired, original.Bytes()) {
+		t.Fatal("in-place repair left the input untouched")
+	}
+	repairedBackup, err := os.ReadFile(path + ".bak")
+	if err != nil || !bytes.Equal(repairedBackup, backup) {
+		t.Fatal("repair overwrote the existing backup")
 	}
 }
