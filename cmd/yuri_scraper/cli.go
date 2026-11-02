@@ -32,7 +32,7 @@ type commandOptions struct {
 	config, outputDir, source, baseURL, title, format, binDir, root string
 	concurrency, retryCount                                         int
 	rateLimit                                                       float64
-	json, yes, help, debug                                          bool
+	json, yes, help, debug, inPlace                                 bool
 }
 
 // Run executes a command. Result data goes to stdout; diagnostics and progress
@@ -94,6 +94,11 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) (exitCode
 
 	if command == "install" {
 		return runInstall(ctx, options, stdout, stderr)
+	}
+	if command == "repair" {
+		// repair rewrites local files: no configuration, output directory or
+		// network access is involved.
+		return runRepair(positional, options, stdout, stderr)
 	}
 	configPath, _, err := store.ResolvePaths(options.config, ProjectRoot)
 	if err != nil {
@@ -168,6 +173,16 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) (exitCode
 	if err != nil {
 		return commandError(stderr, err, failureCode(ctx))
 	}
+	// The Yamibo adapter may own a visible browser session for authenticated
+	// search and download. Release it once this command exits, before the
+	// process returns and while the logger is still installed.
+	if closer, ok := service.Search.Registry().Get(sites.SourceYamibo).(interface{ Close() error }); ok {
+		defer func() {
+			if err := closer.Close(); err != nil {
+				slog.Warn("yamibo.close", "error", diagnostics.Failure(err))
+			}
+		}()
+	}
 	switch command {
 	case "tui":
 		return runTUI(ctx, service, false, stdout, stderr)
@@ -238,7 +253,7 @@ func runTUI(ctx context.Context, service *app.Service, showLibrary bool, stdout,
 
 func knownCommand(command string) bool {
 	switch command {
-	case "help", "version", "tui", "search", "query", "download", "library", "list", "open", "reveal", "retry", "remove", "forget", "config", "install", "logs":
+	case "help", "version", "tui", "search", "query", "download", "library", "list", "open", "reveal", "retry", "remove", "forget", "config", "install", "logs", "repair":
 		return true
 	}
 	return false
@@ -295,8 +310,11 @@ func parseOptions(command string, args []string) (commandOptions, []string, map[
 		flags.StringVar(&options.baseURL, "base-url", "", "Local HTTP fixture origin (52shuku only)")
 	}
 	switch command {
-	case "search", "query", "download", "library", "list", "retry", "config", "install":
+	case "search", "query", "download", "library", "list", "retry", "config", "install", "repair":
 		flags.BoolVar(&options.json, "json", false, "Write machine-readable JSON result to stdout")
+	}
+	if command == "repair" {
+		flags.BoolVar(&options.inPlace, "in-place", false, "Overwrite each EPUB in place, keeping the original as FILE.bak")
 	}
 	if command == "download" {
 		flags.StringVar(&options.title, "title", "", "Book title override (otherwise source metadata)")
@@ -391,6 +409,15 @@ func validateArguments(command string, args []string, options commandOptions) er
 			return fmt.Errorf("unknown library action %q", action)
 		}
 		return validateArguments(action, args[1:], options)
+	case "repair":
+		if len(args) == 0 {
+			return errors.New("repair requires at least one EPUB file")
+		}
+		for _, arg := range args {
+			if !strings.EqualFold(filepath.Ext(arg), ".epub") {
+				return fmt.Errorf("repair expects .epub files, got %q", arg)
+			}
+		}
 	}
 	if (command == "remove" || command == "forget") && !options.yes {
 		return fmt.Errorf("%s requires --yes", command)
@@ -538,6 +565,7 @@ func authenticate(ctx context.Context, service *app.Service, source string, stde
 	if err != nil {
 		return fmt.Errorf("read password: %w", err)
 	}
+	fmt.Fprintln(stderr, "若打开浏览器，请在窗口完成网站验证")
 	defer func() {
 		for index := range password {
 			password[index] = 0
@@ -611,7 +639,7 @@ func failureCode(ctx context.Context) int {
 }
 
 func printRootHelp(writer io.Writer) {
-	fmt.Fprintln(writer, "Usage: yuri-scraper [--config FILE] [--output-dir DIR] [--debug] COMMAND [OPTIONS]\n\nWithout a command, opens the terminal interface.\nCommands: tui, search (query), download, library, list, open, reveal, retry, remove, forget, config show, install, logs, version\nlogs: 查看最近 100 条诊断日志；--debug: 开启请求级诊断。\nUse COMMAND --help for command options.\nExit codes: 0 success, 1 failure, 2 usage, 3 partial download, 130 canceled.")
+	fmt.Fprintln(writer, "Usage: yuri-scraper [--config FILE] [--output-dir DIR] [--debug] COMMAND [OPTIONS]\n\nWithout a command, opens the terminal interface.\nCommands: tui, search (query), download, library, list, open, reveal, retry, remove, forget, config show, install, logs, repair, version\nrepair: 重建已下载 EPUB 的章节与目录（repair FILE.epub [--in-place]）。\nlogs: 查看最近 100 条诊断日志；--debug: 开启请求级诊断。\nUse COMMAND --help for command options.\nExit codes: 0 success, 1 failure, 2 usage, 3 partial download, 130 canceled.")
 }
 func commandUsage(command string) string {
 	switch command {
@@ -621,6 +649,8 @@ func commandUsage(command string) string {
 		return "download URL [--title TITLE] [--source NAME] [--json] [OPTIONS]"
 	case "library":
 		return "library [list | open ID | reveal ID | retry ID | remove ID --yes | forget ID --yes] [--json] [OPTIONS]"
+	case "repair":
+		return "repair FILE... [--in-place] [--json]"
 	case "open", "reveal", "retry":
 		return command + " ID [OPTIONS]"
 	case "remove", "forget":

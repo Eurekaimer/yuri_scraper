@@ -18,7 +18,11 @@ const (
 	defaultYamiboMinChars  = 80
 )
 
-var yamiboUID = regexp.MustCompile(`(?:uid[-=]|[?&]uid=)(\d+)`)
+var (
+	yamiboUID      = regexp.MustCompile(`(?:uid[-=]|[?&]uid=)(\d+)`)
+	yamiboAuthorID = regexp.MustCompile(`[?&]authorid=(\d+)`)
+	yamiboDigits   = regexp.MustCompile(`^\d+$`)
+)
 
 type yamiboPost struct {
 	PID     string
@@ -31,15 +35,22 @@ type yamiboPost struct {
 type yamiboScanCheckpoint struct {
 	ThreadURL    string           `json:"thread_url"`
 	Author       string           `json:"author"`
+	AuthorID     string           `json:"author_id,omitempty"`
+	Filtered     bool             `json:"filtered,omitempty"`
 	MinPostChars int              `json:"min_post_chars"`
 	TotalPages   int              `json:"total_pages"`
 	NextPage     int              `json:"next_page"`
 	Chapters     []search.Chapter `json:"chapters"`
 }
 
-// PlanChapters keeps catalog and author-post resolution as explicit
-// strategies. Auto mode uses a convincing catalog first, then falls back to
-// paginated posts by the first author with substantial prose.
+type yamiboScanOutcome struct {
+	Chapters       []search.Chapter
+	ScannedPages   int
+	CheckpointHits int
+	TotalPages     int
+}
+
+// PlanChapters prefers a recognized catalog, then scans the thread starter's posts.
 func (y *Yamibo) PlanChapters(ctx context.Context, threadURL string, opts search.ChapterPlanOptions) (search.ChapterPlan, error) {
 	if opts.Mode == "" {
 		opts.Mode = search.ChapterModeAuto
@@ -76,17 +87,22 @@ func (y *Yamibo) PlanChapters(ctx context.Context, threadURL string, opts search
 
 	author := strings.TrimSpace(opts.Author)
 	if author == "" {
-		author = yamiboFirstSubstantialAuthor(doc, opts.MinPostChars)
+		starter := yamiboThreadStarterInfo(doc)
+		author = starter.UID
+		if author == "" {
+			author = starter.Name
+		}
 	}
 	if author == "" {
-		return plan, fmt.Errorf("当前帖子没有足够长的正文楼层")
+		return plan, fmt.Errorf("无法确定帖子作者，请在章节规划中指定作者")
 	}
-	chapters, scanned, hits, err := y.scanAuthorPosts(ctx, doc, threadURL, author, totalPages, opts)
+	outcome, err := y.scanAuthorPosts(ctx, doc, threadURL, author, totalPages, opts)
 	plan.Strategy = search.ChapterModeAuthor
 	plan.Author = author
-	plan.ScannedPages = scanned
-	plan.CheckpointHits = hits
-	plan.Chapters = renumberChapters(chapters)
+	plan.TotalPages = outcome.TotalPages
+	plan.ScannedPages = outcome.ScannedPages
+	plan.CheckpointHits = outcome.CheckpointHits
+	plan.Chapters = renumberChapters(outcome.Chapters)
 	if err != nil {
 		return plan, err
 	}
@@ -96,15 +112,38 @@ func (y *Yamibo) PlanChapters(ctx context.Context, threadURL string, opts search
 	return plan, nil
 }
 
-func (y *Yamibo) scanAuthorPosts(ctx context.Context, firstDoc *goquery.Document, threadURL, author string, totalPages int, opts search.ChapterPlanOptions) ([]search.Chapter, int, int, error) {
+// scanAuthorPosts uses the forum's author-filtered view when available.
+func (y *Yamibo) scanAuthorPosts(ctx context.Context, firstDoc *goquery.Document, threadURL, author string, totalPages int, opts search.ChapterPlanOptions) (yamiboScanOutcome, error) {
+	outcome := yamiboScanOutcome{TotalPages: totalPages}
+	authorUID, filtered := yamiboAuthorFilter(firstDoc, author)
+	matchAuthor, firstPageDoc := author, firstDoc
+	pageURL := func(page int) string { return yamiboThreadPage(threadURL, page) }
+	if filtered {
+		matchAuthor = authorUID
+		pageURL = func(page int) string { return yamiboAuthorPage(threadURL, authorUID, page) }
+		if yamiboURLAuthorID(threadURL) != authorUID {
+			doc, err := y.document(ctx, pageURL(1))
+			if err != nil {
+				return outcome, fmt.Errorf("扫描作者楼层第 1 页: %w", err)
+			}
+			firstPageDoc = doc
+		}
+		totalPages = yamiboTotalPages(firstPageDoc)
+		outcome.TotalPages = totalPages
+	}
+
 	maxPages := min(max(1, totalPages), opts.MaxScanPages)
+
 	checkpoint := yamiboScanCheckpoint{
 		ThreadURL: canonicalYamiboThreadURL(threadURL), Author: author,
+		AuthorID: authorUID, Filtered: filtered,
 		MinPostChars: opts.MinPostChars, TotalPages: totalPages, NextPage: 1,
 	}
 	checkpointHits := 0
 	if saved, err := loadYamiboScanCheckpoint(opts.CheckpointPath); err == nil &&
-		saved.ThreadURL == checkpoint.ThreadURL && saved.Author == author && saved.MinPostChars == opts.MinPostChars {
+		saved.ThreadURL == checkpoint.ThreadURL && saved.Author == author &&
+		saved.MinPostChars == opts.MinPostChars && saved.Filtered == filtered &&
+		(!filtered || saved.AuthorID == authorUID) {
 		checkpoint = saved
 		checkpointHits = len(saved.Chapters)
 	}
@@ -118,18 +157,20 @@ func (y *Yamibo) scanAuthorPosts(ctx context.Context, firstDoc *goquery.Document
 	started := time.Now()
 	for page := startPage; page <= maxPages; page++ {
 		if err := ctx.Err(); err != nil {
-			return chapters, page - 1, checkpointHits, err
+			outcome.Chapters, outcome.ScannedPages, outcome.CheckpointHits = chapters, page-1, checkpointHits
+			return outcome, err
 		}
-		doc := firstDoc
+		doc := firstPageDoc
 		if page != 1 {
 			var err error
-			doc, err = y.document(ctx, yamiboThreadPage(threadURL, page))
+			doc, err = y.document(ctx, pageURL(page))
 			if err != nil {
-				return chapters, page - 1, checkpointHits, fmt.Errorf("扫描作者楼层第 %d 页: %w", page, err)
+				outcome.Chapters, outcome.ScannedPages, outcome.CheckpointHits = chapters, page-1, checkpointHits
+				return outcome, fmt.Errorf("扫描作者楼层第 %d 页: %w", page, err)
 			}
 		}
 		for _, post := range yamiboPosts(doc, opts.MinPostChars) {
-			if !yamiboAuthorMatches(post, author) || seen[post.PID] {
+			if !yamiboAuthorMatches(post, matchAuthor) || seen[post.PID] {
 				continue
 			}
 			chapter := search.Chapter{Title: post.Title, URL: yamiboPostURL(threadURL, post.PID), SiteName: y.Name()}
@@ -137,14 +178,16 @@ func (y *Yamibo) scanAuthorPosts(ctx context.Context, firstDoc *goquery.Document
 			chapters = append(chapters, chapter)
 			if opts.ContentSink != nil {
 				if err := opts.ContentSink(chapter, post.Content); err != nil {
-					return chapters, page - 1, checkpointHits, fmt.Errorf("保存作者楼层正文 checkpoint: %w", err)
+					outcome.Chapters, outcome.ScannedPages, outcome.CheckpointHits = chapters, page-1, checkpointHits
+					return outcome, fmt.Errorf("保存作者楼层正文 checkpoint: %w", err)
 				}
 			}
 		}
 		checkpoint.Chapters = chapters
 		checkpoint.NextPage = page + 1
 		if err := saveYamiboScanCheckpoint(opts.CheckpointPath, checkpoint); err != nil {
-			return chapters, page, checkpointHits, err
+			outcome.Chapters, outcome.ScannedPages, outcome.CheckpointHits = chapters, page, checkpointHits
+			return outcome, err
 		}
 		if opts.OnProgress != nil {
 			opts.OnProgress(search.ChapterPlanProgress{
@@ -153,7 +196,8 @@ func (y *Yamibo) scanAuthorPosts(ctx context.Context, firstDoc *goquery.Document
 			})
 		}
 	}
-	return chapters, maxPages, checkpointHits, nil
+	outcome.Chapters, outcome.ScannedPages, outcome.CheckpointHits = chapters, maxPages, checkpointHits
+	return outcome, nil
 }
 
 func yamiboPosts(doc *goquery.Document, minChars int) []yamiboPost {
@@ -194,15 +238,100 @@ func yamiboPosts(doc *goquery.Document, minChars int) []yamiboPost {
 	return posts
 }
 
-func yamiboFirstSubstantialAuthor(doc *goquery.Document, minChars int) string {
-	posts := yamiboPosts(doc, minChars)
-	if len(posts) == 0 {
+type yamiboThreadStarter struct {
+	Name string
+	UID  string
+}
+
+// yamiboThreadStarterInfo identifies the forum's thread starter. The
+// author-only link exposes the starter UID even when the first post itself
+// uses a mobile layout without a profile link.
+func yamiboThreadStarterInfo(doc *goquery.Document) yamiboThreadStarter {
+	starter := yamiboThreadStarter{}
+	doc.Find("a[href*='viewthread'][href*='authorid=']").EachWithBreak(func(_ int, a *goquery.Selection) bool {
+		href, _ := a.Attr("href")
+		if match := yamiboAuthorID.FindStringSubmatch(href); len(match) > 1 {
+			starter.UID = match[1]
+			return false
+		}
+		return true
+	})
+	first := doc.Find("[id^='post_']").First()
+	if first.Length() == 0 {
+		return starter
+	}
+	authorNode := first.Find(".authi a.xw1, .authi a[href*='uid'], a[href*='space-uid']").First()
+	if authorNode.Length() == 0 {
+		return starter
+	}
+	starter.Name = strings.TrimSpace(authorNode.Text())
+	if starter.UID == "" {
+		href, _ := authorNode.Attr("href")
+		if match := yamiboUID.FindStringSubmatch(href); len(match) > 1 {
+			starter.UID = match[1]
+		}
+	}
+	return starter
+}
+
+// yamiboSelectedAuthorUID resolves an explicit name or UID to the UID used by
+// the forum's author filter.
+func yamiboSelectedAuthorUID(doc *goquery.Document, author string) string {
+	author = strings.TrimSpace(author)
+	if author == "" {
 		return ""
 	}
-	if posts[0].UID != "" {
-		return posts[0].UID
+	if yamiboDigits.MatchString(author) {
+		return author
 	}
-	return posts[0].Author
+	uid := ""
+	doc.Find("[id^='post_']").EachWithBreak(func(_ int, wrapper *goquery.Selection) bool {
+		node := wrapper.Find(".authi a.xw1, .authi a[href*='uid'], a[href*='space-uid']").First()
+		if !strings.EqualFold(strings.TrimSpace(node.Text()), author) {
+			return true
+		}
+		href, _ := node.Attr("href")
+		if match := yamiboUID.FindStringSubmatch(href); len(match) > 1 {
+			uid = match[1]
+			return false
+		}
+		return true
+	})
+	return uid
+}
+
+// yamiboAuthorFilter reports the starter filter to use. It only applies when
+// the selected author is the thread starter, because the forum's authorid
+// view would silently hide anyone else's posts.
+func yamiboAuthorFilter(doc *goquery.Document, author string) (string, bool) {
+	starter := yamiboThreadStarterInfo(doc)
+	selectedUID := yamiboSelectedAuthorUID(doc, author)
+	if selectedUID != "" {
+		return selectedUID, starter.UID != "" && selectedUID == starter.UID
+	}
+	if starter.UID != "" && starter.Name != "" && strings.EqualFold(strings.TrimSpace(starter.Name), strings.TrimSpace(author)) {
+		return starter.UID, true
+	}
+	return "", false
+}
+
+func yamiboURLAuthorID(rawURL string) string {
+	if match := yamiboAuthorID.FindStringSubmatch(rawURL); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func yamiboAuthorPage(threadURL, uid string, page int) string {
+	match := yamiboTID.FindStringSubmatch(threadURL)
+	if len(match) < 2 || uid == "" {
+		return threadURL
+	}
+	base, err := url.Parse(threadURL)
+	if err == nil && base.Scheme != "" && base.Host != "" {
+		return fmt.Sprintf("%s://%s/forum.php?mod=viewthread&tid=%s&page=%d&authorid=%s", base.Scheme, base.Host, match[1], page, uid)
+	}
+	return fmt.Sprintf("%sforum.php?mod=viewthread&tid=%s&page=%d&authorid=%s", yamiboBaseURL, match[1], page, uid)
 }
 
 func yamiboAuthorMatches(post yamiboPost, author string) bool {

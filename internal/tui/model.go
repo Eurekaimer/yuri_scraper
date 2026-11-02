@@ -252,14 +252,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case NoticeMsg:
 		m.notice = msg.Text
 	case authenticationMsg:
-		m.auth.busy = false
+		if !m.auth.finishLogin(msg.attempt) {
+			return m, nil
+		}
 		m.auth.err = msg.err
 		if msg.err == nil {
 			m.auth.username.SetValue("")
 			m.auth.clearPassword()
+			m.viewOffset = 0
 			cmds = append(cmds, m.setSection(SecResults))
 		} else {
 			m.auth.focus = 1
+			m.viewOffset = authErrorLine
 			cmds = append(cmds, m.auth.focusCmd())
 		}
 	case tea.KeyMsg:
@@ -274,6 +278,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !consumed {
 			switch m.section {
 			case SecAuth:
+				m.viewOffset = 0
 				cmds = append(cmds, m.auth.update(msg))
 			case SecChapterPlan:
 				cmds = append(cmds, m.updatePlanInput(msg))

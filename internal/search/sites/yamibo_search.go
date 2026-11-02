@@ -19,6 +19,10 @@ var (
 	yamiboForumID      = regexp.MustCompile(`(?:forum-|[?&]fid=)(\d+)`)
 )
 
+// Discuz search rows put the starter in td.author (table skins) or in a
+// trailing paragraph (default list skins); forum listings reuse td.by.
+const yamiboSearchAuthor = "td.author cite a, td.author a[href*='space-uid'], td.author a[href*='uid='], td.by cite a, td.by a[href*='space-uid'], td.by a[href*='uid='], li.pbw p > span > a[href*='space&uid='], li.pbw p > span > a[href*='space-uid-'], li.pbw p > span > a[href*='uid=']"
+
 type yamiboSearchHit struct {
 	result    search.SearchResult
 	replyRank int
@@ -130,6 +134,7 @@ func collectYamiboSearchResults(doc *goquery.Document, hits map[string]*yamiboSe
 	for _, fid := range allowedForums {
 		allowed[fid] = true
 	}
+	seen := make(map[string]bool)
 	rank := 0
 	doc.Find("a.xst, a.s.xst, a[href*='mod=viewthread'], a[href*='viewthread']").Each(func(_ int, anchor *goquery.Selection) {
 		href, ok := anchor.Attr("href")
@@ -141,30 +146,33 @@ func collectYamiboSearchResults(doc *goquery.Document, hits map[string]*yamiboSe
 		if len(match) < 2 {
 			return
 		}
-		title := strings.TrimSpace(anchor.Text())
-		if title == "" {
-			return
-		}
-		row := anchor.Closest("tr")
+		row := anchor.Closest("tr, li.pbw")
 		fid, forumName := yamiboSearchForum(row, fallbackFID)
 		if len(allowed) > 0 && fid != 0 && !allowed[fid] {
 			return
 		}
-		rank++
-		replies, views := yamiboSearchStats(row)
 		key := match[1]
 		hit := hits[key]
 		if hit == nil {
-			hit = &yamiboSearchHit{result: search.SearchResult{BookURL: href, SiteName: "百合会"}}
+			// Discuz repeats the thread URL inside reply counters, "只看该作者"
+			// and quoted snippets. The first match in the row is the title, so
+			// only it may name a candidate or pick the URL that gets downloaded.
+			title := strings.TrimSpace(anchor.Text())
+			if !isYamiboSearchTitle(title) {
+				return
+			}
+			hit = &yamiboSearchHit{result: search.SearchResult{Title: title, BookURL: href, SiteName: "百合会", Tags: []string{forumName}}}
 			hits[key] = hit
 		}
-		hit.result.Title = title
-		hit.result.BookURL = href
-		hit.result.Tags = []string{forumName}
+		if !seen[key] {
+			seen[key] = true
+			rank++
+		}
+		replies, views := yamiboSearchStats(row)
 		hit.result.Replies = max(hit.result.Replies, replies)
 		hit.result.Views = max(hit.result.Views, views)
 		if hit.result.Author == "" {
-			hit.result.Author = strings.TrimSpace(row.Find("td.by cite a, td.by a[href*='space-uid'], td.by a[href*='uid=']").First().Text())
+			hit.result.Author = strings.TrimSpace(row.Find(yamiboSearchAuthor).First().Text())
 		}
 		if order == "replies" && (hit.replyRank == 0 || rank < hit.replyRank) {
 			hit.replyRank = rank
@@ -173,6 +181,20 @@ func collectYamiboSearchResults(doc *goquery.Document, hits map[string]*yamiboSe
 			hit.viewRank = rank
 		}
 	})
+}
+
+// yamiboSearchNoiseTitles are anchors Discuz reuses inside result rows and
+// quoted snippets; they must never turn into book candidates.
+var yamiboSearchNoiseTitles = map[string]bool{
+	"只看该作者": true, "回复": true, "评分": true, "收藏": true, "举报": true,
+	"电梯直达": true, "复制链接": true, "楼主": true, "沙发": true, "板凳": true,
+}
+
+func isYamiboSearchTitle(title string) bool {
+	if title == "" || yamiboSearchNoiseTitles[title] {
+		return false
+	}
+	return strings.Trim(title, "0123456789,，. ") != ""
 }
 
 func yamiboSearchForum(row *goquery.Selection, fallback int) (int, string) {
@@ -197,6 +219,10 @@ func yamiboSearchForum(row *goquery.Selection, fallback int) (int, string) {
 
 func yamiboSearchStats(row *goquery.Selection) (int, int) {
 	cell := row.Find("td.num, td[class*='num']").First()
+	if cell.Length() == 0 {
+		// Default Discuz search skins print "N 回复 - M 查看" as plain text.
+		cell = row.Find("p.xg1").First()
+	}
 	values := make([]int, 0, 2)
 	cell.Find("a, em, span").EachWithBreak(func(_ int, node *goquery.Selection) bool {
 		raw := yamiboSearchNumber.FindString(strings.TrimSpace(node.Text()))

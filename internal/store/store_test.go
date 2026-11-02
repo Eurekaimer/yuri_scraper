@@ -97,19 +97,41 @@ func TestLoadConfigMergesMissingYamiboDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Yamibo.MaxConcurrency != 2 || cfg.Yamibo.RateLimit != 1.2 || cfg.Yamibo.MaxScanPages != 10 || cfg.Yamibo.MinPostChars != 80 {
+	if cfg.Yamibo != DefaultConfig().Yamibo {
 		t.Fatalf("missing defaults were not merged: %#v", cfg.Yamibo)
 	}
 }
 
 func TestLoadConfigRejectsUnsafeYamiboRate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	data := "output_dir: books\nformat: txt\nconcurrency: 4\nrate_limit: 1\nretry_count: 2\nyamibo:\n  rate_limit: 2.5\n"
+	data := "output_dir: books\nformat: txt\nconcurrency: 4\nrate_limit: 1\nretry_count: 2\nyamibo:\n  rate_limit: 10.1\n"
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := LoadConfig(path); err == nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestYamiboSpeedLimitValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		concurrency int
+		rate        float64
+		valid       bool
+	}{
+		{"low budget", 2, 1.2, true},
+		{"maximum", 12, 10, true},
+		{"too many workers", 13, 10, false},
+		{"too many requests", 12, 10.1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Yamibo.MaxConcurrency, cfg.Yamibo.RateLimit = tc.concurrency, tc.rate
+			if err := cfg.Validate(); (err == nil) != tc.valid {
+				t.Fatalf("Validate() = %v, valid %t", err, tc.valid)
+			}
+		})
 	}
 }
 

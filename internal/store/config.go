@@ -43,8 +43,8 @@ func DefaultConfig() Config {
 		RetryCount:  3,
 		Startup:     StartupConfig{Animation: "sweep"},
 		Yamibo: YamiboConfig{
-			MaxConcurrency: 2,
-			RateLimit:      1.2,
+			MaxConcurrency: 12,
+			RateLimit:      10,
 			MaxScanPages:   10,
 			MinPostChars:   80,
 		},
@@ -101,11 +101,11 @@ func (cfg Config) Validate() error {
 	if cfg.Concurrency <= 0 || cfg.Concurrency > 64 || cfg.RateLimit <= 0 || cfg.RateLimit > 20 || math.IsNaN(cfg.RateLimit) || math.IsInf(cfg.RateLimit, 0) || cfg.RetryCount < 0 || cfg.RetryCount > 10 {
 		return fmt.Errorf("concurrency must be 1..64, rate_limit must be >0 and <=20, retry_count must be 0..10")
 	}
-	if cfg.Yamibo.MaxConcurrency < 1 || cfg.Yamibo.MaxConcurrency > 2 {
-		return fmt.Errorf("yamibo.max_concurrency must be 1..2")
+	if cfg.Yamibo.MaxConcurrency < 1 || cfg.Yamibo.MaxConcurrency > 12 {
+		return fmt.Errorf("yamibo.max_concurrency must be 1..12")
 	}
-	if cfg.Yamibo.RateLimit <= 0 || cfg.Yamibo.RateLimit > 1.2 || math.IsNaN(cfg.Yamibo.RateLimit) || math.IsInf(cfg.Yamibo.RateLimit, 0) {
-		return fmt.Errorf("yamibo.rate_limit must be >0 and <=1.2")
+	if cfg.Yamibo.RateLimit <= 0 || cfg.Yamibo.RateLimit > 10 || math.IsNaN(cfg.Yamibo.RateLimit) || math.IsInf(cfg.Yamibo.RateLimit, 0) {
+		return fmt.Errorf("yamibo.rate_limit must be >0 and <=10")
 	}
 	if cfg.Yamibo.MaxScanPages <= 0 {
 		return fmt.Errorf("yamibo.max_scan_pages must be positive")

@@ -8,10 +8,10 @@ output_dir: novels
 # 输出格式: txt 或 epub
 format: epub
 
-# 并发下载数（实际生效；52书库上限 64，百合会上限 2）
+# 并发下载数（实际生效；52书库上限 64，百合会上限 12）
 concurrency: 8
 
-# 每秒请求数（实际生效；52书库上限 20，百合会上限 1.2）
+# 每秒请求数（实际生效；52书库上限 20，百合会上限 10）
 rate_limit: 2.0
 
 # 失败重试次数
@@ -23,7 +23,7 @@ startup:
   reduced_motion: false
 
 yamibo:
-  max_concurrency: 2
-  rate_limit: 1.2
+  max_concurrency: 12
+  rate_limit: 10
   max_scan_pages: 10
   min_post_chars: 80

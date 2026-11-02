@@ -134,9 +134,16 @@ func Failure(err error) slog.Attr {
 
 func Guidance(err error) string {
 	var httpErr *transport.HTTPError
-	switch {
-	case err == nil:
+	if err == nil {
 		return ""
+	}
+	var guided interface{ Guidance() string }
+	if errors.As(err, &guided) {
+		if advice := strings.TrimSpace(guided.Guidance()); advice != "" {
+			return advice
+		}
+	}
+	switch {
 	case errors.Is(err, context.Canceled):
 		return "操作已取消；已保存的章节可在重试时复用。"
 	case errors.Is(err, os.ErrPermission):

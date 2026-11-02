@@ -74,10 +74,11 @@ func (m *Model) handleKey(msg tea.KeyMsg, cmds *[]tea.Cmd) bool {
 	if m.section == SecAuth {
 		switch key {
 		case "esc":
-			m.auth.clearPassword()
+			m.auth.cancelLogin()
 			*cmds = append(*cmds, m.setSection(SecSources))
 			return true
 		case "tab", "shift+tab":
+			m.viewOffset = 0
 			*cmds = append(*cmds, m.auth.toggleFocus())
 			return true
 		case "enter":
@@ -86,23 +87,26 @@ func (m *Model) handleKey(msg tea.KeyMsg, cmds *[]tea.Cmd) bool {
 			}
 			if m.auth.focus == 0 {
 				m.auth.focus = 1
+				m.viewOffset = 0
 				*cmds = append(*cmds, m.auth.focusCmd())
 				return true
 			}
 			username, password, err := m.auth.credentials()
 			if err != nil {
 				m.auth.err = err
+				m.viewOffset = authErrorLine
 				return true
 			}
 			auth, ok := m.sources[m.sourceCursor].(search.CredentialsAuthenticator)
 			if !ok {
 				m.auth.err = errors.New("此书源不支持账号登录")
+				m.viewOffset = authErrorLine
 				return true
 			}
-			m.auth.busy = true
-			m.auth.err = nil
+			attemptCtx, attempt := m.auth.beginLogin(m.ctx)
+			m.viewOffset = 0
 			m.auth.clearPassword()
-			*cmds = append(*cmds, authenticate(m.ctx, auth, username, password))
+			*cmds = append(*cmds, authenticate(attemptCtx, auth, username, password, attempt))
 			return true
 		}
 		return false
@@ -203,6 +207,12 @@ func (m *Model) handleKey(msg tea.KeyMsg, cmds *[]tea.Cmd) bool {
 				moved = true
 			case "3":
 				m.service.SetSpeed(scraper.SpeedFast)
+				moved = true
+			case "4":
+				m.service.SetSpeed(scraper.SpeedTurbo)
+				moved = true
+			case "5":
+				m.service.SetSpeed(scraper.SpeedExtreme)
 				moved = true
 			case "a":
 				_, moved = m.service.StepSpeed(false)
@@ -527,6 +537,8 @@ func (m *Model) scrollView(delta int) {
 		content = m.renderHelp(m.contentWidth())
 	case m.section == SecChapterPlan:
 		content = m.renderChapterPlanContent(m.contentWidth())
+	case m.section == SecAuth:
+		content = m.renderAuthContent()
 	case m.section == SecProgress:
 		content = m.renderProgressContent(m.contentWidth())
 	case m.details && m.section == SecResults && m.cursor < len(m.results):

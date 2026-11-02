@@ -61,7 +61,7 @@ func (m *Model) View() string {
 	} else if m.confirmDelete {
 		content = TitleStyle.Render("移入回收站？") + "\n" + truncate(clean(m.deleteEntry.Title), w) + "\n\n文件将移入 .trash，可手动恢复。\ny 确认 · 其他键取消"
 		offset = 0
-	} else if m.section == SecAuth && h < 6 {
+	} else if m.section == SecAuth && h < 6 && offset == 0 {
 		offset = max(0, 2+m.auth.focus-h+1)
 	} else if m.section == SecSources {
 		offset = max(0, m.sourceCursor+2-h+1)
@@ -224,19 +224,28 @@ func (m *Model) renderSourcesContent() string {
 }
 
 func (m *Model) renderAuthContent() string {
-	status := "凭据仅用于本次会话，不会写入磁盘。"
-	if m.auth.busy {
-		status = "正在登录…"
-	} else if m.auth.err != nil {
-		status = clean(m.auth.err.Error())
+	w := m.contentWidth()
+	var b strings.Builder
+	b.WriteString(TitleStyle.Render("书源登录") + "\n\n账号  " + m.auth.username.View() + "\n密码  " + m.auth.password.View() + "\n\n")
+	wrap := lipgloss.NewStyle().Width(w)
+	switch {
+	case m.auth.busy:
+		b.WriteString(MutedStyle.Render(wrap.Render("正在登录… Esc 取消并返回")))
+	case m.auth.err != nil:
+		b.WriteString(ErrorStyle.Render(wrap.Render("原因  " + clean(m.auth.err.Error()))))
+		if advice := clean(errorGuidance(m.auth.err)); advice != "" {
+			b.WriteString("\n" + MutedStyle.Render(wrap.Render("建议  "+advice)))
+		}
+	default:
+		b.WriteString(MutedStyle.Render(wrap.Render("凭据仅用于本次会话，不会写入磁盘。")))
 	}
-	return TitleStyle.Render("书源登录") + "\n\n账号  " + m.auth.username.View() + "\n密码  " + m.auth.password.View() + "\n\n" + MutedStyle.Render(status)
+	return b.String()
 }
 
 func (m *Model) renderChapterPlanContent(w int) string {
 	var b strings.Builder
 	b.WriteString(TitleStyle.Render("章节规划") + "\n")
-	for i, mode := range []string{"自动识别目录或作者正文", "目录模式 · 选择候选目录", "作者模式 · 限页扫描正文"} {
+	for i, mode := range []string{"自动识别目录或作者正文", "目录模式 · 选择候选目录", "作者模式 · 扫描作者楼层"} {
 		b.WriteString(listRow(mode, i == m.modeCursor && m.planFocus == 0, w) + "\n")
 	}
 	b.WriteString("\n作者 / UID  " + m.authorInput.View() + "\n扫描页数    " + m.maxPagesInput.View() + "\n最少字数    " + m.minCharsInput.View() + "\n\n")
@@ -251,7 +260,7 @@ func (m *Model) renderChapterPlanContent(w int) string {
 	} else {
 		b.WriteString("未找到目录；自动模式可尝试作者正文。")
 	}
-	b.WriteString("\n" + MutedStyle.Render("扫描受页数上限约束，不保证收录全帖。"))
+	b.WriteString("\n" + MutedStyle.Render("作者楼层扫描受页数上限约束。"))
 	if m.planErr != nil {
 		b.WriteString("\n" + ErrorStyle.Render(clean(m.planErr.Error())))
 	}
@@ -351,7 +360,7 @@ func (m *Model) renderStatusBar() string {
 		case SecSearch:
 			return StatusBarStyle.Render("Enter 提交 · Esc 返回")
 		case SecAuth:
-			return StatusBarStyle.Render("Tab 切换 · Enter 登录 · Esc 返回")
+			return StatusBarStyle.Render("PgUp/PgDn 翻页 · Tab 切换 · Enter 登录 · Esc 取消")
 		case SecChapterPlan:
 			return StatusBarStyle.Render("Tab 字段 · Enter 开始 · PgDn 下翻")
 		case SecProgress:
@@ -373,12 +382,12 @@ func (m *Model) renderStatusBar() string {
 	case SecSearch:
 		return StatusBarStyle.Render("输入模式 · Enter 提交 · Esc 保留草稿并返回")
 	case SecAuth:
-		return StatusBarStyle.Render("Tab 切换字段 · Enter 登录 · Esc 返回")
+		return StatusBarStyle.Render("Tab 切换字段 · Enter 登录 · Esc 取消 · PgUp/PgDn 翻页")
 	case SecChapterPlan:
 		return StatusBarStyle.Render("j/k 模式 · h/l 候选 · Tab 字段 · Enter 开始 · PgUp/PgDn 翻页")
 	case SecProgress:
 		if m.active() {
-			return StatusBarStyle.Render("a/d 调速 · 1/2/3 档位 · x 取消 · Esc 浏览 · b 书库")
+			return StatusBarStyle.Render("a/d 调速 · 1/2/3/4/5 档位 · x 取消 · Esc 浏览 · b 书库")
 		}
 		if m.canRetryTask() {
 			return StatusBarStyle.Render("r 重试 · Esc 浏览 · b 书库 · ! 诊断")
@@ -394,7 +403,7 @@ func (m *Model) renderStatusBar() string {
 
 func (m *Model) renderHelp(w int) string {
 	return TitleStyle.Render("键盘操作") + "\n\n" +
-		"j/k 或 ↑↓      选择条目\ngg / G         首项 / 末项\nCtrl+U/D       上 / 下半页\n/ 或 i         搜索（输入模式）\nf              筛选已有结果\nCtrl+F         切换搜索分区\nl / Esc        详情 / 返回\nTab            开关宽屏预览\ns / b / t      书源 / 书库 / 任务\np              论坛章节规划\nEnter          下载 / 打开\nv / d          定位 / 移入回收站\nr              重试搜索或失败任务\n!              错误诊断与最近日志\na / d          任务页减速 / 加速\n1 / 2 / 3      慢速 / 标准 / 快速\nx              取消搜索或下载\nq / Ctrl+C     退出并取消任务\nPgUp/PgDn      长页面翻页\n\n输入模式下 j/k/h/l/q 均为普通文字。\n浏览其他页面时，下载仍会继续。\n实际并发与速率受配置和书源上限约束。\n\nEsc 或 ? 关闭帮助。"
+		"j/k 或 ↑↓      选择条目\ngg / G         首项 / 末项\nCtrl+U/D       上 / 下半页\n/ 或 i         搜索（输入模式）\nf              筛选已有结果\nCtrl+F         切换搜索分区\nl / Esc        详情 / 返回\nTab            开关宽屏预览\ns / b / t      书源 / 书库 / 任务\np              论坛章节规划\nEnter          下载 / 打开\nv / d          定位 / 移入回收站\nr              重试搜索或失败任务\n!              错误诊断与最近日志\na / d          任务页减速 / 加速\n1 / 2 / 3 / 4 / 5  慢速 / 标准 / 快速 / 高速 / 极速\nx              取消搜索或下载\nq / Ctrl+C     退出并取消任务\nPgUp/PgDn      长页面翻页\n\n输入模式下 j/k/h/l/q 均为普通文字。\n浏览其他页面时，下载仍会继续。\n实际并发与速率受配置和书源上限约束。\n\nEsc 或 ? 关闭帮助。"
 }
 
 func stateLabel(state string) string {
@@ -429,6 +438,10 @@ func speedLabel(speed string) string {
 		return "慢速"
 	case "fast":
 		return "快速"
+	case "turbo":
+		return "高速"
+	case "extreme":
+		return "极速"
 	case "", "normal":
 		return "标准"
 	default:
